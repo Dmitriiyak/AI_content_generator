@@ -1,9 +1,15 @@
 package main
 
 import (
+	"AIGenerator/auth"
+	"context"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
 	"github.com/joho/godotenv"
 )
 
@@ -31,4 +37,47 @@ func main() {
 
 	log.Printf("Переменные окружения загружены успешно")
 
+	// Парсим переменные окружения
+	apiID, err := strconv.Atoi(os.Getenv("API_ID"))
+	if err != nil {
+		log.Fatal("Неверный API_ID (см. main.go): ", err)
+	}
+
+	apiHash := os.Getenv("API_HASH")
+	if apiHash == "" {
+		log.Fatal("API_HASH не установлен (см. main.go)")
+	}
+
+	log.Printf("Успешный парсинг переменных окружения")
+
+	// Создаем папку для сессии если её нет
+	if err := os.MkdirAll("tdsession", 0700); err != nil {
+		log.Fatal("Ошибка создания папки сессии: ", err)
+	}
+
+	// Создаем клиент Telegram с хранилищем сессии
+	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		SessionStorage: &session.FileStorage{
+			Path: "tdsession/session.json",
+		},
+	})
+
+	ctx := context.Background()
+
+	// Запускаем клиент и аутентификацию
+	log.Printf("Запускаем Telegram клиент...")
+	if err := client.Run(ctx, func(ctx context.Context) error {
+		if err := auth.Authenticate(ctx, client); err != nil {
+			return fmt.Errorf("аутентификация не удалась: %w", err)
+		}
+
+		log.Printf("Аутентификация завершена успешно")
+		fmt.Println("Аутентификация завершена успешно!")
+
+		<-ctx.Done()
+
+		return nil
+	}); err != nil {
+		log.Fatalf("Ошибка запуска клиента: %v", err)
+	}
 }
