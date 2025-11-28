@@ -3,3 +3,7 @@
 *.env
 
 logs.txt
+
+.json
+.key
+tdsession/
