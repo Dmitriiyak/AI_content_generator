@@ -1,7 +1,7 @@
 package main
 
 import (
-	"AIGenerator/auth"
+	"AIGenerator/internal/auth"
 	"context"
 	"fmt"
 	"log"
@@ -74,6 +74,7 @@ func main() {
 		log.Printf("Аутентификация завершена успешно")
 		fmt.Println("Аутентификация завершена успешно!")
 
+		// Оставляем программу работать
 		<-ctx.Done()
 
 		return nil

@@ -107,8 +107,8 @@ func Authenticate(ctx context.Context, client *telegram.Client) error {
 		userInfo += " (@" + me.Username + ")"
 	}
 
-	log.Printf("✅ Успешный вход как: %s", userInfo)
-	fmt.Printf("👤 Вы вошли как: %s\n", userInfo)
+	log.Printf("Успешный вход как: %s", userInfo)
+	fmt.Printf("Вы вошли как: %s\n", userInfo)
 
 	return nil
 }
