@@ -16,11 +16,6 @@ type Article struct {
 	Relevance   float64   `json:"relevance"` // релевантность для канала (0-1)
 }
 
-// NewsAggregator управляет сбором новостей
-type NewsAggregator struct {
-	sources []NewsSource
-}
-
 // NewsSource представляет источник новостей
 type NewsSource interface {
 	FetchArticles() ([]Article, error)

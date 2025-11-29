@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -104,7 +105,7 @@ func (c *YandexGPTClient) AnalyzeText(ctx context.Context, prompt string) (strin
 	fmt.Printf("🔧 Используем модель: %s\n", c.modelURI)
 
 	request := ChatCompletionRequest{
-		Model: c.modelURI, // Используем единственную проверенную модель
+		Model: c.modelURI,
 		Messages: []Message{
 			{
 				Role:    "user",
@@ -221,6 +222,79 @@ func (c *YandexGPTClient) AnalyzeChannel(ctx context.Context, channelName, descr
 	return c.AnalyzeText(ctx, prompt)
 }
 
+// SelectRelevantNews выбирает самые релевантные новости для канала через AI
+func (c *YandexGPTClient) SelectRelevantNews(ctx context.Context, channelAnalysis *ChannelAnalysis, articles []ArticleRelevance, maxResults int) ([]NewsRelevance, error) {
+	if len(articles) == 0 {
+		return []NewsRelevance{}, nil
+	}
+
+	// Ограничиваем количество статей для анализа
+	if len(articles) > 20 {
+		articles = articles[:20]
+	}
+
+	prompt := fmt.Sprintf(`
+ВЫБОР РЕЛЕВАНТНЫХ НОВОСТЕЙ ДЛЯ TELEGRAM КАНАЛА
+
+ИНФОРМАЦИЯ О КАНАЛЕ:
+- Основная тема: %s
+- Подтемы: %s
+- Целевая аудитория: %s
+- Стиль контента: %s
+- Ключевые слова: %s
+- Рекомендуемый угол подачи: %s
+
+СПИСОК НОВОСТЕЙ ДЛЯ ОЦЕНКИ:
+%s
+
+ПРОАНАЛИЗИРУЙ и верни ТОП-%d самых релевантных новостей в формате JSON:
+
+{
+  "selected_news": [
+    {
+      "article": {
+        "title": "заголовок новости",
+        "summary": "описание новости", 
+        "url": "ссылка на новость"
+      },
+      "relevance": 0.95,
+      "explanation": "подробное объяснение релевантности",
+      "match_reasons": ["причина 1", "причина 2", "причина 3"]
+    }
+  ]
+}
+
+КРИТЕРИИ ОЦЕНКИ:
+1. Соответствие основной теме и подтемам канала
+2. Интерес для целевой аудитории  
+3. Возможность подачи под рекомендуемым углом
+4. Актуальность и информационная ценность
+
+Верни ТОЛЬКО JSON без дополнительных текстов.
+`,
+		channelAnalysis.MainTopic,
+		strings.Join(channelAnalysis.Subtopics, ", "),
+		channelAnalysis.TargetAudience,
+		channelAnalysis.ContentStyle,
+		strings.Join(channelAnalysis.Keywords, ", "),
+		channelAnalysis.ContentAngle,
+		formatArticlesForPrompt(articles),
+		maxResults,
+	)
+
+	response, err := c.AnalyzeText(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка AI-подбора новостей: %w", err)
+	}
+
+	var selectionResponse NewsSelectionResponse
+	if err := json.Unmarshal([]byte(response), &selectionResponse); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга ответа AI: %w", err)
+	}
+
+	return selectionResponse.SelectedNews, nil
+}
+
 // formatMessages форматирует сообщения для промпта
 func formatMessages(messages []string) string {
 	var result string
@@ -233,6 +307,16 @@ func formatMessages(messages []string) string {
 		}
 	}
 	return result
+}
+
+// formatArticlesForPrompt форматирует статьи для промпта
+func formatArticlesForPrompt(articles []ArticleRelevance) string {
+	var result strings.Builder
+	for i, article := range articles {
+		result.WriteString(fmt.Sprintf("%d. ЗАГОЛОВОК: %s\n   ОПИСАНИЕ: %s\n   ССЫЛКА: %s\n\n",
+			i+1, article.Title, article.Summary, article.URL))
+	}
+	return result.String()
 }
 
 func min(a, b int) int {
