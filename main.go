@@ -1,6 +1,8 @@
 package main
 
 import (
+	"AIGenerator/internal/ai"
+	"AIGenerator/internal/analyzer"
 	"AIGenerator/internal/auth"
 	"context"
 	"fmt"
@@ -73,6 +75,30 @@ func main() {
 
 		log.Printf("Аутентификация завершена успешно")
 		fmt.Println("Аутентификация завершена успешно!")
+
+		// === ТЕСТИРОВАНИЕ YANDEXGPT КЛИЕНТА ===
+		fmt.Println("\n🔧 Инициализируем YandexGPT клиент...")
+		gptClient, err := ai.NewYandexGPTClient()
+		if err != nil {
+			log.Printf("❌ YandexGPT клиент не создан: %v", err)
+			fmt.Println("❌ YandexGPT клиент не создан. Проверьте переменные в .env:")
+			fmt.Println("   - YANDEX_GPT_API_KEY")
+			fmt.Println("   - YANDEX_FOLDER_ID")
+			return nil
+		}
+
+		channelAnalyzer := analyzer.NewChannelAnalyzer(client.API(), gptClient)
+
+		// Тестовый анализ
+		testAnalysis, err := channelAnalyzer.AnalyzeChannel(ctx, "tproger")
+		if err != nil {
+			log.Printf("❌ Ошибка анализа канала: %v", err)
+		} else {
+			fmt.Printf("✅ AI-анализ завершен!\n")
+			fmt.Printf("   Канал: %s (@%s)\n", testAnalysis.ChannelInfo.Title, testAnalysis.ChannelInfo.Username)
+			fmt.Printf("   Основная тема: %s\n", testAnalysis.GPTAnalysis.MainTopic)
+			fmt.Printf("   Подтемы: %v\n", testAnalysis.GPTAnalysis.Subtopics)
+		}
 
 		// Оставляем программу работать
 		<-ctx.Done()

@@ -28,13 +28,11 @@ type Message struct {
 	MediaType string    `json:"media_type"`
 }
 
-// ChannelAnalysis содержит полный анализ канала
+// ChannelAnalysis содержит полный AI-анализ канала
 type ChannelAnalysis struct {
-	ChannelInfo  ChannelInfo `json:"channel_info"`
-	Messages     []Message   `json:"messages"`
-	Topics       []string    `json:"topics"`
-	PostFormats  []string    `json:"post_formats"`
-	BestPostTime []int       `json:"best_post_time"` // Часы, когда посты получают больше всего engagement
+	ChannelInfo ChannelInfo  `json:"channel_info"`
+	Messages    []Message    `json:"messages"`
+	GPTAnalysis *GPTAnalysis `json:"gpt_analysis"`
 }
 
 // TopicWeight представляет тему и её вес в канале
