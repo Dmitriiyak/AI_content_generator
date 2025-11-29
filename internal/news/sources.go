@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -38,20 +39,33 @@ func (r *RSSSource) GetCategories() []string {
 }
 
 func (r *RSSSource) FetchArticles() ([]Article, error) {
-	resp, err := http.Get(r.URL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", r.URL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка получения RSS (см. sources.go): %w", err)
+		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
+	}
+
+	// Добавляем заголовки чтобы избежать блокировок
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения RSS: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ошибка статуса RSS: %d", resp.StatusCode)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения RSS (см. sources.go): %w", err)
+		return nil, fmt.Errorf("ошибка чтения RSS: %w", err)
 	}
 
 	var rss RSS
 	if err := xml.Unmarshal(body, &rss); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга RSS (см. sources.go): %w", err)
+		return nil, fmt.Errorf("ошибка парсинга RSS: %w", err)
 	}
 
 	var articles []Article
@@ -63,15 +77,15 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 			pubDate = time.Now()
 		}
 
-		// Пропускаем старые новости (больше 3 дней)
-		if time.Since(pubDate) > 3*24*time.Hour {
+		// Пропускаем старые новости (больше 2 дней)
+		if time.Since(pubDate) > 48*time.Hour {
 			continue
 		}
 
 		article := Article{
-			Title:       item.Title,
+			Title:       cleanText(item.Title),
 			URL:         item.Link,
-			Summary:     item.Description,
+			Summary:     cleanText(item.Description),
 			PublishedAt: pubDate,
 			Source:      r.Name,
 			Category:    item.Category,
@@ -83,8 +97,27 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 	return articles, nil
 }
 
+// cleanText очищает текст от HTML тегов и лишних пробелов
+func cleanText(text string) string {
+	// Простая очистка - убираем множественные пробелы и обрезаем
+	text = strings.TrimSpace(text)
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.ReplaceAll(text, "\t", " ")
+
+	// Убираем множественные пробелы
+	for strings.Contains(text, "  ") {
+		text = strings.ReplaceAll(text, "  ", " ")
+	}
+
+	return text
+}
+
 // parseDate пытается распарсить различные форматы дат
 func parseDate(dateStr string) (time.Time, error) {
+	if dateStr == "" {
+		return time.Now(), nil
+	}
+
 	formats := []string{
 		time.RFC1123,
 		time.RFC1123Z,
@@ -92,7 +125,9 @@ func parseDate(dateStr string) (time.Time, error) {
 		time.RFC822Z,
 		"Mon, 2 Jan 2006 15:04:05 -0700",
 		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05-07:00",
 		"02.01.2006 15:04",
+		"Mon, 02 Jan 2006 15:04:05 GMT",
 	}
 
 	for _, format := range formats {
@@ -101,10 +136,10 @@ func parseDate(dateStr string) (time.Time, error) {
 		}
 	}
 
-	return time.Time{}, fmt.Errorf("неизвестный формат даты (см. sources.go): %s", dateStr)
+	return time.Now(), nil // Возвращаем текущее время если не удалось распарсить
 }
 
-// GetDefaultSources возвращает список популярных RSS-лент
+// GetDefaultSources возвращает расширенный список RSS-лент
 func GetDefaultSources() []RSSSource {
 	return []RSSSource{
 		{
@@ -129,7 +164,7 @@ func GetDefaultSources() []RSSSource {
 		},
 		{
 			Name:       "Хабрахабр",
-			URL:        "https://habr.com/ru/rss/all/all/",
+			URL:        "https://habr.com/ru/rss/articles/?fl=ru",
 			Categories: []string{"технологии", "программирование", "it"},
 		},
 		{
@@ -146,6 +181,41 @@ func GetDefaultSources() []RSSSource {
 			Name:       "3DNews",
 			URL:        "https://3dnews.ru/news/rss/",
 			Categories: []string{"технологии", "железо", "гаджеты"},
+		},
+		{
+			Name:       "IXBT",
+			URL:        "https://www.ixbt.com/export/news.rss",
+			Categories: []string{"технологии", "железо", "обзоры"},
+		},
+		{
+			Name:       "Ferra",
+			URL:        "https://www.ferra.ru/exports/rss/",
+			Categories: []string{"технологии", "гаджеты", "игры"},
+		},
+		{
+			Name:       "Российская Газета",
+			URL:        "https://rg.ru/export/rss/lenta.xml",
+			Categories: []string{"новости", "политика", "общество"},
+		},
+		{
+			Name:       "Lenta.ru",
+			URL:        "https://lenta.ru/rss",
+			Categories: []string{"новости", "политика", "экономика"},
+		},
+		{
+			Name:       "Meduza",
+			URL:        "https://meduza.io/rss/all",
+			Categories: []string{"новости", "политика", "общество"},
+		},
+		{
+			Name:       "Forbes",
+			URL:        "https://www.forbes.ru/newrss.xml",
+			Categories: []string{"бизнес", "финансы", "экономика"},
+		},
+		{
+			Name:       "Ведомости",
+			URL:        "https://www.vedomosti.ru/rss/news",
+			Categories: []string{"бизнес", "экономика", "финансы"},
 		},
 	}
 }

@@ -10,19 +10,23 @@ import (
 
 	"AIGenerator/internal/ai"
 	"AIGenerator/internal/analyzer"
+	"AIGenerator/internal/categories"
 )
 
 // NewsAggregator управляет сбором и фильтрацией новостей
 type NewsAggregator struct {
-	sources   []NewsSource
-	gptClient *ai.YandexGPTClient
+	sources         []NewsSource
+	gptClient       *ai.YandexGPTClient
+	lastSourceIndex int
+	categorySystem  *categories.Category
 }
 
 // NewNewsAggregator создает новый агрегатор новостей
 func NewNewsAggregator(gptClient *ai.YandexGPTClient) *NewsAggregator {
 	return &NewsAggregator{
-		sources:   make([]NewsSource, 0),
-		gptClient: gptClient,
+		sources:         make([]NewsSource, 0),
+		gptClient:       gptClient,
+		lastSourceIndex: -1,
 	}
 }
 
@@ -46,11 +50,13 @@ func (na *NewsAggregator) FetchAllArticles() ([]Article, error) {
 			continue
 		}
 		allArticles = append(allArticles, articles...)
-		log.Printf("📥 Получено %d статей из %s", len(articles), source.GetName())
 	}
 
-	log.Printf("✅ Всего собрано %d статей", len(allArticles))
-	return allArticles, nil
+	// Фильтруем военные темы
+	filteredArticles := na.FilterOutMilitaryTopics(allArticles)
+
+	log.Printf("✅ Собрано %d статей (после фильтрации)", len(filteredArticles))
+	return filteredArticles, nil
 }
 
 // FilterOutMilitaryTopics фильтрует военные темы из статей
@@ -72,17 +78,15 @@ func (na *NewsAggregator) FilterOutMilitaryTopics(articles []Article) []Article 
 		}
 	}
 
-	log.Printf("🔍 Фильтрация военных тем: %d -> %d статей", len(articles), len(filtered))
 	return filtered
 }
 
 // containsMilitaryTopics проверяет статью на военную тематику
 func (na *NewsAggregator) containsMilitaryTopics(article Article, keywords []string) bool {
-	text := strings.ToLower(article.Title + " " + article.Summary + " " + article.Content)
+	text := strings.ToLower(article.Title + " " + article.Summary)
 
 	for _, keyword := range keywords {
 		if strings.Contains(text, strings.ToLower(keyword)) {
-			log.Printf("🚫 Отфильтрована военная тема: %s - ключевое слово '%s'", article.Title, keyword)
 			return true
 		}
 	}
@@ -90,150 +94,131 @@ func (na *NewsAggregator) containsMilitaryTopics(article Article, keywords []str
 	return false
 }
 
-// FindRelevantArticles улучшенная версия с AI-подбором и фильтрацией военных тем
+// FindRelevantArticles улучшенная версия с точными категориями
 func (na *NewsAggregator) FindRelevantArticles(ctx context.Context, articles []Article, analysis *analyzer.ChannelAnalysis, maxArticles int) []Article {
-	// ФИЛЬТРУЕМ ВОЕННЫЕ ТЕМЫ перед анализом
-	filteredArticles := na.FilterOutMilitaryTopics(articles)
-
-	if len(filteredArticles) == 0 {
-		log.Printf("⚠️ После фильтрации военных тем не осталось статей")
+	if len(articles) == 0 {
 		return []Article{}
 	}
 
-	if analysis == nil || analysis.GPTAnalysis == nil || na.gptClient == nil {
-		log.Printf("⚠️ AI-анализ недоступен, используем базовую фильтрацию")
-		return na.findRelevantBasic(filteredArticles, analysis, maxArticles)
+	// Определяем категорию канала
+	channelCategory := na.determineChannelCategory(analysis)
+	log.Printf("🎯 Категория канала: %s", channelCategory)
+
+	// Рассчитываем релевантность для всех статей
+	for i := range articles {
+		articles[i].Relevance = na.CalculatePreciseRelevance(articles[i], analysis, channelCategory)
 	}
 
-	return na.findRelevantWithAI(ctx, filteredArticles, analysis, maxArticles)
-}
+	// Сортируем по релевантности
+	sort.Slice(articles, func(i, j int) bool {
+		return articles[i].Relevance > articles[j].Relevance
+	})
 
-// findRelevantWithAI интеллектуальный подбор новостей через AI
-func (na *NewsAggregator) findRelevantWithAI(ctx context.Context, articles []Article, analysis *analyzer.ChannelAnalysis, maxArticles int) []Article {
-	// Конвертируем данные в формат для AI
-	channelAnalysis := na.convertAnalysisForAI(analysis)
-	articlesForAI := na.convertArticlesForAI(articles)
-
-	if len(articlesForAI) == 0 {
-		log.Printf("⚠️ Нет свежих новостей для AI-подбора")
-		return []Article{}
-	}
-
-	if channelAnalysis == nil {
-		log.Printf("⚠️ Нет анализа канала для AI-подбора")
-		return na.findRelevantBasic(articles, analysis, maxArticles)
-	}
-
-	// Используем AI для подбора новостей
-	relevantNews, err := na.gptClient.SelectRelevantNews(ctx, channelAnalysis, articlesForAI, maxArticles)
-	if err != nil {
-		log.Printf("⚠️ AI-подбор не удался, используем базовую фильтрацию: %v", err)
-		return na.findRelevantBasic(articles, analysis, maxArticles)
-	}
-
-	// Сопоставляем выбранные AI новости с исходными статьями
-	var result []Article
-	for _, newsItem := range relevantNews {
-		for _, originalArticle := range articles {
-			if originalArticle.URL == newsItem.Article.URL {
-				originalArticle.Relevance = newsItem.Relevance
-				result = append(result, originalArticle)
-				break
-			}
+	// Фильтруем только релевантные статьи (релевантность > 0.6)
+	var relevantArticles []Article
+	for _, article := range articles {
+		if article.Relevance > 0.6 {
+			relevantArticles = append(relevantArticles, article)
 		}
-
-		if len(result) >= maxArticles {
+		if len(relevantArticles) >= maxArticles*2 {
 			break
 		}
 	}
 
-	log.Printf("🎯 AI-подбор: выбрано %d релевантных новостей из %d", len(result), len(articles))
+	// Если релевантных статей мало, добавляем менее релевантные
+	if len(relevantArticles) < maxArticles {
+		for _, article := range articles {
+			if article.Relevance > 0.4 && len(relevantArticles) < maxArticles*2 {
+				// Проверяем, нет ли уже этой статьи
+				found := false
+				for _, relArticle := range relevantArticles {
+					if relArticle.URL == article.URL {
+						found = true
+						break
+					}
+				}
+				if !found {
+					relevantArticles = append(relevantArticles, article)
+				}
+			}
+		}
+	}
 
-	// Сортируем по релевантности
-	na.sortArticlesByRelevance(result)
+	// Выбираем лучшие статьи из разных источников
+	result := na.selectDiverseArticles(relevantArticles, maxArticles)
 
+	log.Printf("🎯 Итоговый выбор: %d статей (из %d релевантных)", len(result), len(relevantArticles))
 	return result
 }
 
-// convertAnalysisForAI конвертирует анализ канала в формат для AI
-func (na *NewsAggregator) convertAnalysisForAI(analysis *analyzer.ChannelAnalysis) *ai.ChannelAnalysis {
+// determineChannelCategory определяет категорию канала
+func (na *NewsAggregator) determineChannelCategory(analysis *analyzer.ChannelAnalysis) string {
 	if analysis == nil || analysis.GPTAnalysis == nil {
-		return nil
+		return "Общее"
 	}
 
-	return &ai.ChannelAnalysis{
-		MainTopic:      analysis.GPTAnalysis.MainTopic,
-		Subtopics:      analysis.GPTAnalysis.Subtopics,
-		TargetAudience: analysis.GPTAnalysis.TargetAudience.AgeRange,
-		ContentStyle:   na.formatContentStyle(analysis.GPTAnalysis.ContentStyle),
-		Keywords:       analysis.GPTAnalysis.Keywords,
-		ContentAngle:   analysis.GPTAnalysis.ContentAngle,
-	}
-}
+	text := strings.ToLower(analysis.GPTAnalysis.MainTopic + " " +
+		strings.Join(analysis.GPTAnalysis.Subtopics, " ") + " " +
+		strings.Join(analysis.GPTAnalysis.Keywords, " "))
 
-// formatContentStyle форматирует стиль контента для промпта
-func (na *NewsAggregator) formatContentStyle(style analyzer.ContentStyle) string {
-	return fmt.Sprintf("Формальность: %d/10, Профессионализм: %d/10, Развлекательность: %d/10",
-		style.Formality, style.Professionalism, style.Entertainment)
-}
+	categories := categories.GetCategories()
+	bestCategory := "Общее"
+	maxScore := 0
 
-// convertArticlesForAI конвертирует статьи в формат для AI
-func (na *NewsAggregator) convertArticlesForAI(articles []Article) []ai.ArticleRelevance {
-	var result []ai.ArticleRelevance
-	for _, article := range articles {
-		// Пропускаем старые новости
-		if time.Since(article.PublishedAt) > 48*time.Hour {
-			continue
+	for categoryName, category := range categories {
+		score := 0
+		// Проверяем основную тему
+		if strings.Contains(text, strings.ToLower(categoryName)) {
+			score += 10
 		}
 
-		result = append(result, ai.ArticleRelevance{
-			Title:   article.Title,
-			Summary: article.Summary,
-			URL:     article.URL,
-		})
-	}
-	return result
-}
-
-// findRelevantBasic базовая фильтрация (fallback)
-func (na *NewsAggregator) findRelevantBasic(articles []Article, analysis *analyzer.ChannelAnalysis, maxArticles int) []Article {
-	var relevantArticles []Article
-
-	for _, article := range articles {
-		// Пропускаем старые новости
-		if time.Since(article.PublishedAt) > 72*time.Hour {
-			continue
+		// Проверяем ключевые слова категории
+		for _, keyword := range category.Keywords {
+			if strings.Contains(text, strings.ToLower(keyword)) {
+				score += 2
+			}
 		}
 
-		relevance := na.calculateBasicRelevance(article, analysis)
-		if relevance > 0.3 {
-			article.Relevance = relevance
-			relevantArticles = append(relevantArticles, article)
+		// Проверяем подтемы
+		for _, subtopic := range category.Subtopics {
+			if strings.Contains(text, strings.ToLower(subtopic)) {
+				score += 3
+			}
+		}
+
+		if score > maxScore {
+			maxScore = score
+			bestCategory = categoryName
 		}
 	}
 
-	na.sortArticlesByRelevance(relevantArticles)
-
-	if len(relevantArticles) > maxArticles {
-		relevantArticles = relevantArticles[:maxArticles]
-	}
-
-	return relevantArticles
+	return bestCategory
 }
 
-// calculateBasicRelevance вычисляет базовую релевантность
-func (na *NewsAggregator) calculateBasicRelevance(article Article, analysis *analyzer.ChannelAnalysis) float64 {
+// CalculatePreciseRelevance вычисляет точную релевантность на основе категорий
+func (na *NewsAggregator) CalculatePreciseRelevance(article Article, analysis *analyzer.ChannelAnalysis, channelCategory string) float64 {
 	if analysis == nil || analysis.GPTAnalysis == nil {
-		return 0.5 // Средняя релевантность если анализа нет
+		return 0.3
 	}
 
 	var relevance float64
 	text := strings.ToLower(article.Title + " " + article.Summary)
 
-	// Проверяем ключевые слова из AI-анализа
+	// Получаем категорию статьи
+	articleCategory := categories.DetectCategory(text)
+
+	// БОЛЬШОЙ бонус за совпадение категорий
+	if articleCategory == channelCategory {
+		relevance += 0.5
+		log.Printf("✅ Совпадение категорий: %s == %s", articleCategory, channelCategory)
+	}
+
+	// Проверяем ключевые слова из анализа канала
+	keywordMatches := 0
 	for _, keyword := range analysis.GPTAnalysis.Keywords {
 		if strings.Contains(text, strings.ToLower(keyword)) {
-			relevance += 0.2
+			keywordMatches++
+			relevance += 0.15
 		}
 	}
 
@@ -242,25 +227,83 @@ func (na *NewsAggregator) calculateBasicRelevance(article Article, analysis *ana
 		relevance += 0.3
 	}
 
+	// Проверяем подтемы
+	for _, subtopic := range analysis.GPTAnalysis.Subtopics {
+		if strings.Contains(text, strings.ToLower(subtopic)) {
+			relevance += 0.1
+		}
+	}
+
 	// Учитываем свежесть
 	hoursSincePublished := time.Since(article.PublishedAt).Hours()
-	if hoursSincePublished < 24 {
-		relevance += 0.3
-	} else if hoursSincePublished < 48 {
+	if hoursSincePublished < 6 {
+		relevance += 0.2
+	} else if hoursSincePublished < 12 {
+		relevance += 0.15
+	} else if hoursSincePublished < 24 {
 		relevance += 0.1
 	}
 
-	return min(relevance, 1.0)
+	// Бонус за предпочтительные источники для категории
+	if cat, exists := categories.GetCategory(channelCategory); exists {
+		for _, source := range cat.Sources {
+			if article.Source == source {
+				relevance += 0.1
+				break
+			}
+		}
+	}
+
+	// Ограничиваем максимальную релевантность
+	if relevance > 1.0 {
+		relevance = 1.0
+	}
+
+	return relevance
 }
 
-// sortArticlesByRelevance сортирует статьи по релевантности
-func (na *NewsAggregator) sortArticlesByRelevance(articles []Article) {
-	sort.Slice(articles, func(i, j int) bool {
-		return articles[i].Relevance > articles[j].Relevance
-	})
+// selectDiverseArticles выбирает статьи из разных источников
+func (na *NewsAggregator) selectDiverseArticles(articles []Article, maxArticles int) []Article {
+	var result []Article
+	usedSources := make(map[string]bool)
+
+	// Сначала берем самые релевантные из разных источников
+	for _, article := range articles {
+		if len(result) >= maxArticles {
+			break
+		}
+		if !usedSources[article.Source] {
+			result = append(result, article)
+			usedSources[article.Source] = true
+			log.Printf("✅ Выбрана статья из %s: %s (релевантность: %.2f)",
+				article.Source, article.Title, article.Relevance)
+		}
+	}
+
+	// Если не набрали достаточно, добавляем самые релевантные независимо от источника
+	if len(result) < maxArticles {
+		for _, article := range articles {
+			if len(result) >= maxArticles {
+				break
+			}
+			// Проверяем, не добавили ли мы уже эту статью
+			alreadyAdded := false
+			for _, addedArticle := range result {
+				if addedArticle.URL == article.URL {
+					alreadyAdded = true
+					break
+				}
+			}
+			if !alreadyAdded {
+				result = append(result, article)
+			}
+		}
+	}
+
+	return result
 }
 
-// GenerateContentIdeas улучшенная генерация идей
+// GenerateContentIdeas генерирует идеи для контента
 func (na *NewsAggregator) GenerateContentIdeas(articles []Article, analysis *analyzer.ChannelAnalysis) []string {
 	var ideas []string
 
@@ -276,56 +319,15 @@ func (na *NewsAggregator) GenerateContentIdeas(articles []Article, analysis *ana
 	return ideas
 }
 
-// generateChannelAngle создает уникальный угол подачи для конкретного канала
+// generateChannelAngle создает уникальный угол подачи
 func (na *NewsAggregator) generateChannelAngle(article Article, analysis *analyzer.ChannelAnalysis) string {
 	if analysis.GPTAnalysis == nil {
-		return na.generateBasicDiscussionPrompt(article)
+		return "Практический подход с пользой для аудитории"
 	}
 
-	// Используем content_angle из AI-анализа если доступен
 	if analysis.GPTAnalysis.ContentAngle != "" {
 		return analysis.GPTAnalysis.ContentAngle
 	}
 
-	// Выбираем угол в зависимости от стиля контента
-	if analysis.GPTAnalysis.ContentStyle.Professionalism >= 7 {
-		return "Аналитический подход с экспертным мнением"
-	} else if analysis.GPTAnalysis.ContentStyle.Entertainment >= 6 {
-		return "Интерактивный и вовлекающий стиль"
-	}
-
 	return "Практический подход с пользой для аудитории"
-}
-
-// generateBasicDiscussionPrompt создает базовый промпт для обсуждения
-func (na *NewsAggregator) generateBasicDiscussionPrompt(article Article) string {
-	return fmt.Sprintf("Обсудите эту новость с вашей аудиторией. Какие мысли и мнения у вас возникают по этому поводу? %s", article.Title)
-}
-
-// GetSafeArticles возвращает только безопасные статьи (без военных тем)
-func (na *NewsAggregator) GetSafeArticles(articles []Article) []Article {
-	return na.FilterOutMilitaryTopics(articles)
-}
-
-// GetArticlesByCategory возвращает статьи по категории
-func (na *NewsAggregator) GetArticlesByCategory(articles []Article, category string) []Article {
-	var result []Article
-	categoryLower := strings.ToLower(category)
-
-	for _, article := range articles {
-		if strings.Contains(strings.ToLower(article.Category), categoryLower) ||
-			strings.Contains(strings.ToLower(article.Source), categoryLower) {
-			result = append(result, article)
-		}
-	}
-
-	return result
-}
-
-// Вспомогательная функция
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }

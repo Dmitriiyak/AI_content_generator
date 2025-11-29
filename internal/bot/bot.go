@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"AIGenerator/internal/ai"
 	"AIGenerator/internal/analyzer"
@@ -15,10 +16,12 @@ import (
 
 // Bot представляет Telegram бота
 type Bot struct {
-	api             *tgbotapi.BotAPI
-	channelAnalyzer *analyzer.ChannelAnalyzer
-	newsAggregator  *news.NewsAggregator
-	gptClient       *ai.YandexGPTClient
+	api              *tgbotapi.BotAPI
+	channelAnalyzer  *analyzer.ChannelAnalyzer
+	newsAggregator   *news.NewsAggregator
+	gptClient        *ai.YandexGPTClient
+	userFirstRequest map[int64]bool      // Отслеживаем первый запрос пользователя
+	userLastRequest  map[int64]time.Time // Время последнего запроса
 }
 
 // New создает нового бота
@@ -29,10 +32,12 @@ func New(token string, analyzer *analyzer.ChannelAnalyzer, newsAggregator *news.
 	}
 
 	return &Bot{
-		api:             api,
-		channelAnalyzer: analyzer,
-		newsAggregator:  newsAggregator,
-		gptClient:       gptClient,
+		api:              api,
+		channelAnalyzer:  analyzer,
+		newsAggregator:   newsAggregator,
+		gptClient:        gptClient,
+		userFirstRequest: make(map[int64]bool),
+		userLastRequest:  make(map[int64]time.Time),
 	}, nil
 }
 
@@ -43,7 +48,7 @@ func (b *Bot) Start(ctx context.Context) {
 
 	updates := b.api.GetUpdatesChan(u)
 
-	log.Printf("Бот запущен: @%s", b.api.Self.UserName)
+	log.Printf("🤖 Бот запущен: @%s", b.api.Self.UserName)
 
 	for update := range updates {
 		if update.Message == nil {
@@ -60,61 +65,28 @@ func (b *Bot) Start(ctx context.Context) {
 			case "generate":
 				b.handleGenerate(ctx, update.Message)
 			default:
-				b.sendMessage(update.Message.Chat.ID, "Неизвестная команда. Используйте /help для списка команд.")
+				b.sendMessage(update.Message.Chat.ID, "❌ Неизвестная команда. Используйте /help для списка команд.")
 			}
 		}
 	}
 }
 
-// handleStart обрабатывает команду /start
-func (b *Bot) handleStart(msg *tgbotapi.Message) {
-	welcomeText := `👋 *Добро пожаловать в AI Content Generator!*
-
-Я помогу вам создавать качественные посты для вашего Telegram канала на основе актуальных новостей.
-
-📋 *Доступные команды:*
-/start - начать работу
-/help - показать справку
-/generate - создать пост для канала
-
-💡 *Пример использования:*
-"generate @example" - создать пост для канала @example
-
-Я проанализирую канал, подберу релевантную новость и сгенерирую готовый пост в стиле вашего канала!
-
-ВАЖНО: Бот не предлагает посты на военную тематику!`
-
-	b.sendMessage(msg.Chat.ID, welcomeText)
-}
-
-// handleHelp обрабатывает команду /help
-func (b *Bot) handleHelp(msg *tgbotapi.Message) {
-	helpText := `📖 *Справка по командам*
-
-*/start* - начать работу с ботом
-*/help* - показать эту справку  
-*/generate <канал>* - создать пост для указанного канала
-
-🔧 *Как использовать /generate:*
-Формат: /generate @username
-
-🤖 *Что делает бот:*
-1. Анализирует стиль и тематику вашего канала
-2. Подбирает самую релевантную новость
-3. Генерирует готовый пост в вашем стиле
-4. Возвращает оформленный текст для публикации
-
-⚠️ *Важно:* Убедитесь, что канал публичный и доступен для анализа.`
-
-	b.sendMessage(msg.Chat.ID, helpText)
-}
-
 // handleGenerate обрабатывает команду /generate
 func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
+	// Проверяем анти-спам (кроме первого запроса)
+	if !b.isFirstRequest(msg.Chat.ID) && b.isTooFrequent(msg.Chat.ID) {
+		timeLeft := b.getTimeLeft(msg.Chat.ID)
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("⏳ Пожалуйста, подождите %d секунд перед следующим запросом", timeLeft))
+		return
+	}
+
+	// Обновляем время запроса
+	b.updateRequestTime(msg.Chat.ID)
+
 	// Проверяем формат команды
 	args := strings.Fields(msg.Text)
 	if len(args) < 2 {
-		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат команды*\n\nИспользуйте: `/generate @username`\nПример: `/generate @tproger`")
+		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат команды*\n\nИспользуйте: `/generate @username`\nПример: `/generate @test`")
 		return
 	}
 
@@ -122,7 +94,7 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Проверяем формат username
 	if !strings.HasPrefix(channelUsername, "@") {
-		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат username*\n\nКанал должен начинаться с @\nПример: `/generate @tproger`")
+		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат username*\n\nКанал должен начинаться с @\nПример: `/generate @test`")
 		return
 	}
 
@@ -130,12 +102,12 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 	username := strings.TrimPrefix(channelUsername, "@")
 
 	if username == "" {
-		b.sendMessage(msg.Chat.ID, "❌ *Не указан username канала*\n\nПример: `/generate @tproger`")
+		b.sendMessage(msg.Chat.ID, "❌ *Не указан username канала*\n\nПример: `/generate @test`")
 		return
 	}
 
 	// Отправляем сообщение о начале обработки
-	processingMsg := b.sendMessage(msg.Chat.ID, "🔄 *Начинаем анализ...*\n\nАнализирую канал, подбираю новости и генерирую пост. Это займет 1-2 минуты.")
+	processingMsg := b.sendMessage(msg.Chat.ID, "🔄 *Начинаем анализ...*\n\nАнализирую канал и подбираю новости...")
 
 	// 1. Анализируем канал
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🔍 *Анализирую канал...*")
@@ -160,19 +132,83 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// 3. Фильтруем военные темы и подбираем релевантные новости
+	// 3. Подбираем релевантные новости с улучшенной системой категорий
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🎯 *Подбираю релевантные новости...*")
 
-	relevantArticles := b.newsAggregator.FindRelevantArticles(ctx, articles, analysis, 3) // Берем больше для резерва
+	relevantArticles := b.newsAggregator.FindRelevantArticles(ctx, articles, analysis, 3)
 
 	if len(relevantArticles) == 0 {
-		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не найдено релевантных новостей*\n\nВозможные причины:\n• Все новости отфильтрованы (военные темы)\n• Нет подходящих новостей для тематики канала\n• Попробуйте другой канал или повторите позже")
+		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не найдено релевантных новостей*\n\nПопробуйте другой канал или повторите позже.")
 		return
+	}
+
+	// Логируем выбранные новости
+	for i, article := range relevantArticles {
+		log.Printf("📋 Кандидат %d: %s (источник: %s, релевантность: %.2f)",
+			i+1, article.Title, article.Source, article.Relevance)
 	}
 
 	// 4. Генерируем пост
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "✍️ *Генерирую пост...*")
 
+	generatedPost, usedArticle := b.tryGeneratePost(ctx, analysis, relevantArticles)
+
+	if generatedPost == "" {
+		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не удалось сгенерировать пост*\n\nYandexGPT отказался обрабатывать новости. Попробуйте позже.")
+		return
+	}
+
+	// 5. Удаляем сообщение о процессе
+	b.deleteMessage(processingMsg.Chat.ID, processingMsg.MessageID)
+
+	// 6. Отправляем результат
+	successText := fmt.Sprintf("✅ *Пост для %s готов!*\n\n📰 *Источник:* %s\n\nСкопируйте текст ниже для публикации в канале:",
+		channelUsername, usedArticle.Source)
+	b.sendMessage(msg.Chat.ID, successText)
+	b.sendMessage(msg.Chat.ID, generatedPost)
+
+	log.Printf("✅ Успешная генерация поста для @%s", username)
+}
+
+// isFirstRequest проверяет, является ли это первым запросом пользователя
+func (b *Bot) isFirstRequest(chatID int64) bool {
+	if _, exists := b.userFirstRequest[chatID]; !exists {
+		b.userFirstRequest[chatID] = true
+		return true
+	}
+	return false
+}
+
+// isTooFrequent проверяет, не слишком ли часто пользователь отправляет запросы
+func (b *Bot) isTooFrequent(chatID int64) bool {
+	lastRequest, exists := b.userLastRequest[chatID]
+	if !exists {
+		return false
+	}
+	return time.Since(lastRequest) < 30*time.Second
+}
+
+// getTimeLeft возвращает оставшееся время до возможности нового запроса
+func (b *Bot) getTimeLeft(chatID int64) int {
+	lastRequest, exists := b.userLastRequest[chatID]
+	if !exists {
+		return 0
+	}
+	timePassed := time.Since(lastRequest)
+	timeLeft := 30 - int(timePassed.Seconds())
+	if timeLeft < 0 {
+		timeLeft = 0
+	}
+	return timeLeft
+}
+
+// updateRequestTime обновляет время последнего запроса
+func (b *Bot) updateRequestTime(chatID int64) {
+	b.userLastRequest[chatID] = time.Now()
+}
+
+// tryGeneratePost пытается сгенерировать пост для каждой новости по очереди
+func (b *Bot) tryGeneratePost(ctx context.Context, analysis *analyzer.ChannelAnalysis, articles []news.Article) (string, news.Article) {
 	// Конвертируем анализ для AI
 	channelAnalysis := &ai.ChannelAnalysis{
 		MainTopic:      analysis.GPTAnalysis.MainTopic,
@@ -183,11 +219,10 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 		ContentAngle:   analysis.GPTAnalysis.ContentAngle,
 	}
 
-	// Пробуем сгенерировать пост для каждой релевантной новости пока не получится
-	var generatedPost string
-	var usedArticle news.Article
+	// Пробуем по очереди для каждой новости
+	for i, article := range articles {
+		log.Printf("🔄 Попытка генерации %d/%d: %s", i+1, len(articles), article.Title)
 
-	for i, article := range relevantArticles {
 		articleForAI := ai.ArticleRelevance{
 			Title:   article.Title,
 			Summary: article.Summary,
@@ -196,36 +231,32 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 
 		post, err := b.gptClient.GeneratePost(ctx, channelAnalysis, articleForAI)
 		if err != nil {
-			log.Printf("⚠️ Ошибка генерации поста для новости %d: %v", i+1, err)
+			log.Printf("⚠️ Ошибка генерации: %v", err)
 			continue
 		}
 
-		// Проверяем что пост не содержит отказ
-		if !b.isRejectedPost(post) {
-			generatedPost = post
-			usedArticle = article
-			break
-		} else {
-			log.Printf("⚠️ AI отказался генерировать пост для новости: %s", article.Title)
+		// Проверяем что пост не содержит отказ и не слишком короткий
+		if !b.isRejectedPost(post) && len(strings.TrimSpace(post)) >= 100 {
+			formattedPost := b.formatPostForChannel(post, article)
+			log.Printf("✅ Успешная генерация для: %s", article.Title)
+			return formattedPost, article
 		}
+
+		log.Printf("⚠️ Отклонен пост для: %s", article.Title)
 	}
 
-	if generatedPost == "" {
-		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не удалось сгенерировать пост*\n\nYandexGPT отказался обрабатывать все подобранные новости. Это может быть связано с:\n• Ограничениями контент-политики\n• Слишком сложными темами\n• Попробуйте позже или другой канал")
-		return
-	}
+	return "", news.Article{}
+}
 
-	// 5. Отправляем готовый пост
-	resultText := fmt.Sprintf("✅ *Пост для %s готов!*\n\n%s\n\n📊 *Детали:*\n- Канал: %s\n- Тема: %s\n- Релевантность новости: %.2f/1.0\n- Источник: %s",
-		channelUsername,
-		generatedPost,
-		analysis.ChannelInfo.Title,
-		analysis.GPTAnalysis.MainTopic,
-		usedArticle.Relevance,
-		usedArticle.Source,
-	)
+// formatPostForChannel форматирует пост для публикации в канале
+func (b *Bot) formatPostForChannel(post string, article news.Article) string {
+	// Убираем лишние надписи из поста
+	cleanedPost := strings.TrimSpace(post)
 
-	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, resultText)
+	// Добавляем источник в формате: [Новость](ссылка) взята с НазваниеИсточника
+	sourceLine := fmt.Sprintf("\n\n📰 [Новость](%s) взята с *%s*", article.URL, article.Source)
+
+	return cleanedPost + sourceLine
 }
 
 // isRejectedPost проверяет, отказался ли GPT генерировать пост
@@ -238,6 +269,8 @@ func (b *Bot) isRejectedPost(post string) bool {
 		"это не в моей компетенции",
 		"давайте поговорим",
 		"не могу помочь",
+		"я не могу",
+		"как искусственный интеллект",
 	}
 
 	postLower := strings.ToLower(post)
@@ -274,4 +307,63 @@ func (b *Bot) editMessage(chatID int64, messageID int, text string) {
 	if err != nil {
 		log.Printf("Ошибка редактирования сообщения: %v", err)
 	}
+}
+
+// deleteMessage удаляет сообщение
+func (b *Bot) deleteMessage(chatID int64, messageID int) {
+	msg := tgbotapi.NewDeleteMessage(chatID, messageID)
+	_, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("Ошибка удаления сообщения: %v", err)
+	}
+}
+
+// handleStart обрабатывает команду /start
+func (b *Bot) handleStart(msg *tgbotapi.Message) {
+	welcomeText := `👋 *Добро пожаловать в AI Content Generator!*
+
+Я помогу вам создавать качественные посты для вашего Telegram канала на основе актуальных новостей.
+
+📋 *Доступные команды:*
+/start - начать работу
+/help - показать справку
+/generate - создать пост для канала
+
+💡 *Пример использования:*
+/generate @test - создать пост для канала @test
+
+⚡ *Первая генерация* - выполняется сразу
+⏳ *Следующие запросы* - с интервалом 30 секунд
+
+Я проанализирую канал, подберу релевантную новость и сгенерирую готовый пост в стиле вашего канала!`
+
+	b.sendMessage(msg.Chat.ID, welcomeText)
+}
+
+// handleHelp обрабатывает команду /help
+func (b *Bot) handleHelp(msg *tgbotapi.Message) {
+	helpText := `📖 *Справка по командам*
+
+*/start* - начать работу с ботом
+*/help* - показать эту справку  
+*/generate <канал>* - создать пост для указанного канала
+
+🔧 *Как использовать /generate:*
+Формат: /generate @test
+
+⚡ *Особенности работы:*
+- Первая генерация выполняется сразу
+- Следующие запросы - с интервалом 30 секунд
+- Бот запоминает ваш первый запрос
+
+🤖 *Что делает бот:*
+1. Анализирует стиль и тематику вашего канала
+2. Подбирает самую релевантную новость
+3. Генерирует готовый пост в вашем стиле
+4. Возвращает оформленный текст для публикации
+
+⚠️ *Важно:* Убедитесь, что канал публичный и доступен для анализа.
+⚠️ *Важно:* Бот не предлагает посты на военную тематику`
+
+	b.sendMessage(msg.Chat.ID, helpText)
 }
