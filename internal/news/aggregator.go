@@ -53,14 +53,59 @@ func (na *NewsAggregator) FetchAllArticles() ([]Article, error) {
 	return allArticles, nil
 }
 
-// FindRelevantArticles улучшенная версия с AI-подбором
-func (na *NewsAggregator) FindRelevantArticles(ctx context.Context, articles []Article, analysis *analyzer.ChannelAnalysis, maxArticles int) []Article {
-	if analysis == nil || analysis.GPTAnalysis == nil || na.gptClient == nil {
-		log.Printf("⚠️ AI-анализ недоступен, используем базовую фильтрацию")
-		return na.findRelevantBasic(articles, analysis, maxArticles)
+// FilterOutMilitaryTopics фильтрует военные темы из статей
+func (na *NewsAggregator) FilterOutMilitaryTopics(articles []Article) []Article {
+	var filtered []Article
+
+	militaryKeywords := []string{
+		"война", "воен", "боев", "оруж", "атака", "конфликт", "наступление",
+		"оборона", "спецоперация", "ВСУ", "ВС РФ", "минобороны", "погиб",
+		"ранен", "обстрел", "взрыв", "снаряд", "танк", "артиллерия",
+		"авиация", "фронт", "пленных", "удар", "контрнаступление", "ЗСУ",
+		"боеприпас", "мина", "ракета", "дрон", "БПЛА", "кадыров", "пригожин",
+		"чвк", "мобилизация", "призыв", "окоп", "позиция", "штурм",
 	}
 
-	return na.findRelevantWithAI(ctx, articles, analysis, maxArticles)
+	for _, article := range articles {
+		if !na.containsMilitaryTopics(article, militaryKeywords) {
+			filtered = append(filtered, article)
+		}
+	}
+
+	log.Printf("🔍 Фильтрация военных тем: %d -> %d статей", len(articles), len(filtered))
+	return filtered
+}
+
+// containsMilitaryTopics проверяет статью на военную тематику
+func (na *NewsAggregator) containsMilitaryTopics(article Article, keywords []string) bool {
+	text := strings.ToLower(article.Title + " " + article.Summary + " " + article.Content)
+
+	for _, keyword := range keywords {
+		if strings.Contains(text, strings.ToLower(keyword)) {
+			log.Printf("🚫 Отфильтрована военная тема: %s - ключевое слово '%s'", article.Title, keyword)
+			return true
+		}
+	}
+
+	return false
+}
+
+// FindRelevantArticles улучшенная версия с AI-подбором и фильтрацией военных тем
+func (na *NewsAggregator) FindRelevantArticles(ctx context.Context, articles []Article, analysis *analyzer.ChannelAnalysis, maxArticles int) []Article {
+	// ФИЛЬТРУЕМ ВОЕННЫЕ ТЕМЫ перед анализом
+	filteredArticles := na.FilterOutMilitaryTopics(articles)
+
+	if len(filteredArticles) == 0 {
+		log.Printf("⚠️ После фильтрации военных тем не осталось статей")
+		return []Article{}
+	}
+
+	if analysis == nil || analysis.GPTAnalysis == nil || na.gptClient == nil {
+		log.Printf("⚠️ AI-анализ недоступен, используем базовую фильтрацию")
+		return na.findRelevantBasic(filteredArticles, analysis, maxArticles)
+	}
+
+	return na.findRelevantWithAI(ctx, filteredArticles, analysis, maxArticles)
 }
 
 // findRelevantWithAI интеллектуальный подбор новостей через AI
@@ -255,6 +300,26 @@ func (na *NewsAggregator) generateChannelAngle(article Article, analysis *analyz
 // generateBasicDiscussionPrompt создает базовый промпт для обсуждения
 func (na *NewsAggregator) generateBasicDiscussionPrompt(article Article) string {
 	return fmt.Sprintf("Обсудите эту новость с вашей аудиторией. Какие мысли и мнения у вас возникают по этому поводу? %s", article.Title)
+}
+
+// GetSafeArticles возвращает только безопасные статьи (без военных тем)
+func (na *NewsAggregator) GetSafeArticles(articles []Article) []Article {
+	return na.FilterOutMilitaryTopics(articles)
+}
+
+// GetArticlesByCategory возвращает статьи по категории
+func (na *NewsAggregator) GetArticlesByCategory(articles []Article, category string) []Article {
+	var result []Article
+	categoryLower := strings.ToLower(category)
+
+	for _, article := range articles {
+		if strings.Contains(strings.ToLower(article.Category), categoryLower) ||
+			strings.Contains(strings.ToLower(article.Source), categoryLower) {
+			result = append(result, article)
+		}
+	}
+
+	return result
 }
 
 // Вспомогательная функция

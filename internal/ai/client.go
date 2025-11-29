@@ -56,6 +56,12 @@ type ChatCompletionResponse struct {
 	} `json:"usage"`
 }
 
+// PostGenerationRequest запрос на генерацию поста
+type PostGenerationRequest struct {
+	ChannelAnalysis *ChannelAnalysis `json:"channel_analysis"`
+	Article         ArticleRelevance `json:"article"`
+}
+
 // NewYandexGPTClient создает нового клиента для Yandex GPT
 func NewYandexGPTClient() (*YandexGPTClient, error) {
 	apiKey := os.Getenv("YANDEX_GPT_API_KEY")
@@ -317,6 +323,49 @@ func formatArticlesForPrompt(articles []ArticleRelevance) string {
 			i+1, article.Title, article.Summary, article.URL))
 	}
 	return result.String()
+}
+
+// GeneratePost генерирует полноценный Telegram пост
+func (c *YandexGPTClient) GeneratePost(ctx context.Context, analysis *ChannelAnalysis, article ArticleRelevance) (string, error) {
+	prompt := fmt.Sprintf(`
+СГЕНЕРИРУЙ КАЧЕСТВЕННЫЙ TELEGRAM ПОСТ ДЛЯ КАНАЛА
+
+ИНФОРМАЦИЯ О КАНАЛЕ:
+- Основная тема: %s
+- Подтемы: %s  
+- Целевая аудитория: %s
+- Стиль контента: %s
+- Рекомендуемый угол подачи: %s
+
+НОВОСТЬ ДЛЯ ПОСТА:
+- Заголовок: %s
+- Описание: %s
+- Ссылка: %s
+
+ТРЕБОВАНИЯ К ПОСТУ:
+1. **Заголовок**: привлекательный, основан на новости, но может быть творчески переработан
+2. **Основной текст**: 
+   - Полностью соответствует стилю и формату канала
+   - Используй жирный шрифт (**жирный**) для выделения ключевых моментов
+   - Можешь намеренно скрыть некоторые детали чтобы подогреть интерес (но не злоупотребляй этим)
+   - Текст должен быть естественным и вовлекающим
+3. **В конце**: ссылка на источник новости
+
+ВАЖНО: Пост должен выглядеть так, как будто его написал автор канала!
+
+Верни ТОЛЬКО готовый пост без дополнительных комментариев.
+`,
+		analysis.MainTopic,
+		strings.Join(analysis.Subtopics, ", "),
+		analysis.TargetAudience,
+		analysis.ContentStyle,
+		analysis.ContentAngle,
+		article.Title,
+		article.Summary,
+		article.URL,
+	)
+
+	return c.AnalyzeText(ctx, prompt)
 }
 
 func min(a, b int) int {

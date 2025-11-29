@@ -132,5 +132,20 @@ func GetDefaultSources() []RSSSource {
 			URL:        "https://habr.com/ru/rss/all/all/",
 			Categories: []string{"технологии", "программирование", "it"},
 		},
+		{
+			Name:       "РБК",
+			URL:        "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
+			Categories: []string{"новости", "бизнес", "финансы"},
+		},
+		{
+			Name:       "CNews",
+			URL:        "https://www.cnews.ru/inc/rss/news.xml",
+			Categories: []string{"технологии", "it", "гаджеты"},
+		},
+		{
+			Name:       "3DNews",
+			URL:        "https://3dnews.ru/news/rss/",
+			Categories: []string{"технологии", "железо", "гаджеты"},
+		},
 	}
 }

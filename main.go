@@ -4,6 +4,7 @@ import (
 	"AIGenerator/internal/ai"
 	"AIGenerator/internal/analyzer"
 	"AIGenerator/internal/auth"
+	"AIGenerator/internal/bot"
 	"AIGenerator/internal/news"
 	"context"
 	"fmt"
@@ -85,91 +86,71 @@ func main() {
 			fmt.Println("❌ YandexGPT клиент не создан. Проверьте переменные в .env:")
 			fmt.Println("   - YANDEX_GPT_API_KEY")
 			fmt.Println("   - YANDEX_FOLDER_ID")
-			return nil
+			log.Fatal("Приложение остановлено")
 		}
 
 		// Тестируем подключение к YandexGPT
 		fmt.Println("🧪 Тестируем подключение к YandexGPT...")
-		if err := gptClient.TestConnection(ctx); err != nil {
+		if err := gptClient.TestConnection(context.Background()); err != nil {
 			log.Printf("❌ Ошибка подключения к YandexGPT: %v", err)
 			fmt.Println("❌ YandexGPT не доступен. Проверьте:")
 			fmt.Println("1. Правильность API ключа и Folder ID в .env")
 			fmt.Println("2. Доступ к интернету")
 			fmt.Println("3. Активность аккаунта Yandex Cloud")
 			fmt.Println("4. Активирован ли YandexGPT API в консоли")
-			return nil
+			log.Fatal("Приложение остановлено")
 		}
 
 		fmt.Println("✅ YandexGPT подключен успешно!")
 
 		// === СОЗДАЕМ АНАЛИЗАТОР КАНАЛОВ И НОВОСТНОЙ АГРЕГАТОР ===
 		fmt.Println("\n🔧 Инициализируем анализатор каналов...")
-		channelAnalyzer := analyzer.NewChannelAnalyzer(client.API(), gptClient)
+
+		// Создаем анализатор каналов с nil клиентом (будем использовать тестовые данные)
+		channelAnalyzer := analyzer.NewChannelAnalyzer(nil, gptClient)
 
 		fmt.Println("🔧 Инициализируем новостной агрегатор...")
 		newsAggregator := news.NewNewsAggregator(gptClient)
 		newsAggregator.AddDefaultSources()
 
-		// === ТЕСТИРУЕМ АНАЛИЗ КАНАЛА ===
-		fmt.Println("🧪 Тестируем анализ канала...")
-		testAnalysis, err := channelAnalyzer.AnalyzeChannel(ctx, "tproger")
-		if err != nil {
-			log.Printf("❌ Ошибка анализа канала: %v", err)
-			fmt.Println("❌ Ошибка при анализе канала:", err)
-		} else {
-			fmt.Println("✅ Анализ канала выполнен успешно!")
-			fmt.Printf("   Канал: %s (@%s)\n", testAnalysis.ChannelInfo.Title, testAnalysis.ChannelInfo.Username)
-			fmt.Printf("   Основная тема: %s\n", testAnalysis.GPTAnalysis.MainTopic)
-			fmt.Printf("   Подтемы: %v\n", testAnalysis.GPTAnalysis.Subtopics)
-			fmt.Printf("   Ключевые слова: %v\n", testAnalysis.GPTAnalysis.Keywords)
-			fmt.Printf("   Угол подачи: %s\n", testAnalysis.GPTAnalysis.ContentAngle)
+		// === ЗАПУСК TELEGRAM БОТА ===
+		fmt.Println("\n🤖 Запускаем Telegram бота...")
+
+		botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+		if botToken == "" {
+			log.Printf("❌ TELEGRAM_BOT_TOKEN не установлен в .env")
+			fmt.Println("❌ TELEGRAM_BOT_TOKEN не установлен. Добавьте в .env:")
+			fmt.Println("   TELEGRAM_BOT_TOKEN=ваш_токен_бота")
+			log.Fatal("Приложение остановлено")
 		}
 
-		// === ТЕСТИРУЕМ AI-ПОДБОР НОВОСТЕЙ (ЭТАП 3) ===
-		fmt.Println("\n🧪 Тестируем AI-подбор новостей...")
-
-		// Получаем свежие новости
-		articles, err := newsAggregator.FetchAllArticles()
+		// Создаем бота
+		telegramBot, err := bot.New(botToken, channelAnalyzer, newsAggregator, gptClient)
 		if err != nil {
-			log.Printf("❌ Ошибка получения новостей: %v", err)
-			fmt.Println("❌ Ошибка при получении новостей:", err)
-		} else {
-			// Используем AI для подбора релевантных новостей
-			fmt.Println("🔧 Используем AI для подбора релевантных новостей...")
-			relevantArticles := newsAggregator.FindRelevantArticles(ctx, articles, testAnalysis, 3)
-
-			fmt.Printf("✅ AI подобрал %d релевантных новостей:\n", len(relevantArticles))
-			for i, article := range relevantArticles {
-				fmt.Printf("   %d. %s (релевантность: %.2f)\n", i+1, article.Title, article.Relevance)
-				fmt.Printf("      Ссылка: %s\n", article.URL)
-				fmt.Printf("      Источник: %s\n", article.Source)
-				fmt.Println()
-			}
-
-			// Генерируем идеи для контента
-			if len(relevantArticles) > 0 {
-				fmt.Println("🧪 Генерируем идеи для контента...")
-				contentIdeas := newsAggregator.GenerateContentIdeas(relevantArticles, testAnalysis)
-
-				fmt.Printf("✅ Сгенерировано %d идей для контента:\n", len(contentIdeas))
-				for i, idea := range contentIdeas {
-					fmt.Printf("   %d. %s\n", i+1, idea)
-					fmt.Println()
-				}
-			}
+			log.Printf("❌ Ошибка создания бота: %v", err)
+			fmt.Println("❌ Ошибка создания бота:", err)
+			log.Fatal("Приложение остановлено")
 		}
 
-		fmt.Println("\n🎉 Все этапы завершены успешно!")
-		fmt.Println("📊 Система готова к работе:")
-		fmt.Println("   - AI-анализ Telegram каналов ✅")
-		fmt.Println("   - AI-подбор релевантных новостей ✅")
-		fmt.Println("   - Генерация идей для контента ✅")
+		fmt.Println("✅ Бот успешно создан!")
 
-		// Оставляем программу работать для просмотра результатов
-		fmt.Println("\n⏹️  Нажмите Ctrl+C для остановки приложения")
+		// Создаем контекст с отменой для graceful shutdown
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-		// Оставляем основную горутину активной
-		<-ctx.Done()
+		// Запускаем бота в отдельной горутине
+		go func() {
+			log.Printf("🤖 Запуск Telegram бота...")
+			telegramBot.Start(ctx)
+		}()
+
+		fmt.Println("\n🎉 Система полностью готова к работе!")
+		fmt.Println("📱 Бот запущен и ожидает команд:")
+		fmt.Println("   /start - начать работу")
+		fmt.Println("   /help - справка по командам")
+		fmt.Println("   /generate @username - создать пост для канала")
+
+		select {}
 
 		return nil
 	}); err != nil {
