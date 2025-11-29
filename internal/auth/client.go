@@ -99,7 +99,7 @@ func Authenticate(ctx context.Context, client *telegram.Client) error {
 	}
 
 	// Форматируем информацию о пользователе
-	userInfo := fmt.Sprintf("%s", me.FirstName)
+	userInfo := me.FirstName
 	if me.LastName != "" {
 		userInfo += " " + me.LastName
 	}
