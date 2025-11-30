@@ -59,6 +59,23 @@ func (na *NewsAggregator) FetchAllArticles() ([]Article, error) {
 	return filteredArticles, nil
 }
 
+// FindRelevantArticlesForKeywords находит релевантные статьи по ключевым словам
+func (na *NewsAggregator) FindRelevantArticlesForKeywords(ctx context.Context, articles []Article, keywords string, maxArticles int) []Article {
+	if len(articles) == 0 {
+		return []Article{}
+	}
+
+	// Создаем искусственный анализ для ключевых слов
+	analysis := &analyzer.ChannelAnalysis{
+		GPTAnalysis: &analyzer.GPTAnalysis{
+			MainTopic: keywords,
+			Keywords:  strings.Fields(keywords),
+		},
+	}
+
+	return na.FindRelevantArticles(ctx, articles, analysis, maxArticles)
+}
+
 // FilterOutMilitaryTopics фильтрует военные темы из статей
 func (na *NewsAggregator) FilterOutMilitaryTopics(articles []Article) []Article {
 	var filtered []Article

@@ -86,41 +86,61 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 	// Проверяем формат команды
 	args := strings.Fields(msg.Text)
 	if len(args) < 2 {
-		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат команды*\n\nИспользуйте: `/generate @username`\nПример: `/generate @test`")
+		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат команды*\n\nИспользуйте:\n`/generate @username` - для анализа канала\n`/generate ключевые слова` - для генерации по теме\n\nПримеры:\n`/generate @test`\n`/generate IT технологии AI`")
 		return
 	}
 
-	channelUsername := args[1]
+	// Определяем тип запроса: канал или ключевые слова
+	input := strings.Join(args[1:], " ")
+	var isChannel bool
+	var username string
+	var keywords string
 
-	// Проверяем формат username
-	if !strings.HasPrefix(channelUsername, "@") {
-		b.sendMessage(msg.Chat.ID, "❌ *Неверный формат username*\n\nКанал должен начинаться с @\nПример: `/generate @test`")
-		return
-	}
-
-	// Убираем @ для анализа
-	username := strings.TrimPrefix(channelUsername, "@")
-
-	if username == "" {
-		b.sendMessage(msg.Chat.ID, "❌ *Не указан username канала*\n\nПример: `/generate @test`")
-		return
+	if strings.HasPrefix(input, "@") {
+		// Это запрос для канала
+		isChannel = true
+		username = strings.TrimPrefix(input, "@")
+		if username == "" {
+			b.sendMessage(msg.Chat.ID, "❌ *Не указан username канала*\n\nПример: `/generate @test`")
+			return
+		}
+	} else {
+		// Это запрос по ключевым словам
+		isChannel = false
+		keywords = input
+		if len(keywords) < 3 {
+			b.sendMessage(msg.Chat.ID, "❌ *Слишком короткие ключевые слова*\n\nУкажите более конкретную тему для генерации.\nПример: `/generate искусственный интеллект IT`")
+			return
+		}
 	}
 
 	// Отправляем сообщение о начале обработки
-	processingMsg := b.sendMessage(msg.Chat.ID, "🔄 *Начинаем анализ...*\n\nАнализирую канал и подбираю новости...")
+	var processingMsg tgbotapi.Message
+	if isChannel {
+		processingMsg = b.sendMessage(msg.Chat.ID, fmt.Sprintf("🔄 *Начинаем анализ канала @%s...*\n\nАнализирую канал и подбираю новости...", username))
+	} else {
+		processingMsg = b.sendMessage(msg.Chat.ID, fmt.Sprintf("🔄 *Генерирую пост по теме: %s...*\n\nИщу релевантные новости...", keywords))
+	}
 
-	// 1. Анализируем канал
-	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🔍 *Анализирую канал...*")
+	var analysis *analyzer.ChannelAnalysis
+	var err error
 
-	analysis, err := b.channelAnalyzer.AnalyzeChannel(ctx, username)
-	if err != nil {
-		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Ошибка анализа канала*\n\nУбедитесь, что канал существует и является публичным.")
-		return
+	if isChannel {
+		// 1. Анализируем канал
+		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🔍 *Анализирую канал...*")
+		analysis, err = b.channelAnalyzer.AnalyzeChannel(ctx, username)
+		if err != nil {
+			b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Ошибка анализа канала*\n\nУбедитесь, что канал существует и является публичным.")
+			return
+		}
+	} else {
+		// 1. Создаем анализ на основе ключевых слов
+		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🔍 *Анализирую тему...*")
+		analysis = b.createAnalysisFromKeywords(keywords)
 	}
 
 	// 2. Получаем новости
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "📰 *Ищу свежие новости...*")
-
 	articles, err := b.newsAggregator.FetchAllArticles()
 	if err != nil {
 		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Ошибка получения новостей*\n\nПопробуйте позже.")
@@ -132,13 +152,12 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// 3. Подбираем релевантные новости с улучшенной системой категорий
+	// 3. Подбираем релевантные новости
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "🎯 *Подбираю релевантные новости...*")
-
 	relevantArticles := b.newsAggregator.FindRelevantArticles(ctx, articles, analysis, 3)
 
 	if len(relevantArticles) == 0 {
-		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не найдено релевантных новостей*\n\nПопробуйте другой канал или повторите позже.")
+		b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "❌ *Не найдено релевантных новостей*\n\nПопробуйте другую тему или повторите позже.")
 		return
 	}
 
@@ -150,7 +169,6 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 
 	// 4. Генерируем пост
 	b.editMessage(processingMsg.Chat.ID, processingMsg.MessageID, "✍️ *Генерирую пост...*")
-
 	generatedPost, usedArticle := b.tryGeneratePost(ctx, analysis, relevantArticles)
 
 	if generatedPost == "" {
@@ -162,12 +180,52 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message) {
 	b.deleteMessage(processingMsg.Chat.ID, processingMsg.MessageID)
 
 	// 6. Отправляем результат
-	successText := fmt.Sprintf("✅ *Пост для %s готов!*\n\n📰 *Источник:* %s\n\nСкопируйте текст ниже для публикации в канале:",
-		channelUsername, usedArticle.Source)
+	var successText string
+	if isChannel {
+		successText = fmt.Sprintf("✅ *Пост для @%s готов!*\n\n📰 *Источник:* %s\n\nСкопируйте текст ниже для публикации в канале:",
+			username, usedArticle.Source)
+	} else {
+		successText = fmt.Sprintf("✅ *Пост по теме '%s' готов!*\n\n📰 *Источник:* %s\n\nСкопируйте текст ниже для публикации:",
+			keywords, usedArticle.Source)
+	}
+
 	b.sendMessage(msg.Chat.ID, successText)
 	b.sendMessage(msg.Chat.ID, generatedPost)
 
-	log.Printf("✅ Успешная генерация поста для @%s", username)
+	if isChannel {
+		log.Printf("✅ Успешная генерация поста для @%s", username)
+	} else {
+		log.Printf("✅ Успешная генерация поста по теме: %s", keywords)
+	}
+}
+
+// createAnalysisFromKeywords создает анализ канала на основе ключевых слов
+func (b *Bot) createAnalysisFromKeywords(keywords string) *analyzer.ChannelAnalysis {
+	// Создаем базовый анализ на основе ключевых слов
+	return &analyzer.ChannelAnalysis{
+		ChannelInfo: analyzer.ChannelInfo{
+			Title:    "Генерация по ключевым словам",
+			Username: "keywords",
+		},
+		GPTAnalysis: &analyzer.GPTAnalysis{
+			MainTopic:    keywords,
+			Subtopics:    []string{keywords},
+			Keywords:     strings.Fields(keywords),
+			ContentAngle: "информационный пост с практической пользой",
+			ContentStyle: analyzer.ContentStyle{
+				Formality:        6,
+				Professionalism:  7,
+				Entertainment:    5,
+				AvgMessageLength: 250,
+				UsesEmojis:       true,
+			},
+			TargetAudience: analyzer.TargetAudience{
+				AgeRange:              "18-45",
+				ProfessionalInterests: strings.Fields(keywords),
+				PainPoints:            []string{"нехватка времени", "информационный шум"},
+			},
+		},
+	}
 }
 
 // isFirstRequest проверяет, является ли это первым запросом пользователя
