@@ -4,6 +4,6 @@
 
 logs.txt
 
-.json
-.key
+*.json
+*.key
 tdsession/
