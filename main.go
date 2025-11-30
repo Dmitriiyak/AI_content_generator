@@ -6,6 +6,7 @@ import (
 	"AIGenerator/internal/auth"
 	"AIGenerator/internal/bot"
 	"AIGenerator/internal/news"
+	"AIGenerator/internal/storage"
 	"context"
 	"fmt"
 	"log"
@@ -18,7 +19,6 @@ import (
 )
 
 func Setup_logger() *os.File {
-	// Настраивает файл для логов
 	file, err := os.OpenFile("logs.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal("Ошибка настройки логгера (см. Setup_logger в main.go)")
@@ -27,8 +27,7 @@ func Setup_logger() *os.File {
 }
 
 func main() {
-
-	// Настройка логгера (запись в файл logs.txt)
+	// Настройка логгера
 	log_file := Setup_logger()
 	defer log_file.Close()
 	log.SetOutput(log_file)
@@ -36,7 +35,7 @@ func main() {
 
 	// Загружаем переменные окружения
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Ошибка загрузки переменных окружения (см. main.go)")
+		log.Fatal("Ошибка загрузки переменных окружения (см. main.go))")
 	}
 
 	log.Printf("Переменные окружения загружены успешно")
@@ -53,6 +52,16 @@ func main() {
 	}
 
 	log.Printf("Успешный парсинг переменных окружения")
+
+	// Инициализируем хранилище
+	fmt.Println("🔧 Инициализируем хранилище...")
+	userStorage := storage.NewStorage("users.json")
+	if err := userStorage.Load(); err != nil {
+		log.Printf("⚠️ Ошибка загрузки хранилища: %v", err)
+		fmt.Println("⚠️ Создано новое хранилище")
+	} else {
+		fmt.Println("✅ Хранилище загружено успешно")
+	}
 
 	// Создаем папку для сессии если её нет
 	if err := os.MkdirAll("tdsession", 0700); err != nil {
@@ -89,24 +98,10 @@ func main() {
 			log.Fatal("Приложение остановлено")
 		}
 
-		// Тестируем подключение к YandexGPT
-		fmt.Println("🧪 Тестируем подключение к YandexGPT...")
-		if err := gptClient.TestConnection(context.Background()); err != nil {
-			log.Printf("❌ Ошибка подключения к YandexGPT: %v", err)
-			fmt.Println("❌ YandexGPT не доступен. Проверьте:")
-			fmt.Println("1. Правильность API ключа и Folder ID в .env")
-			fmt.Println("2. Доступ к интернету")
-			fmt.Println("3. Активность аккаунта Yandex Cloud")
-			fmt.Println("4. Активирован ли YandexGPT API в консоли")
-			log.Fatal("Приложение остановлено")
-		}
-
 		fmt.Println("✅ YandexGPT подключен успешно!")
 
 		// === СОЗДАЕМ АНАЛИЗАТОР КАНАЛОВ И НОВОСТНОЙ АГРЕГАТОР ===
 		fmt.Println("\n🔧 Инициализируем анализатор каналов...")
-
-		// Создаем анализатор каналов с nil клиентом (будем использовать тестовые данные)
 		channelAnalyzer := analyzer.NewChannelAnalyzer(nil, gptClient)
 
 		fmt.Println("🔧 Инициализируем новостной агрегатор...")
@@ -124,8 +119,8 @@ func main() {
 			log.Fatal("Приложение остановлено")
 		}
 
-		// Создаем бота
-		telegramBot, err := bot.New(botToken, channelAnalyzer, newsAggregator, gptClient)
+		// Создаем бота с хранилищем
+		telegramBot, err := bot.New(botToken, channelAnalyzer, newsAggregator, gptClient, userStorage)
 		if err != nil {
 			log.Printf("❌ Ошибка создания бота: %v", err)
 			fmt.Println("❌ Ошибка создания бота:", err)
@@ -143,12 +138,6 @@ func main() {
 			log.Printf("🤖 Запуск Telegram бота...")
 			telegramBot.Start(ctx)
 		}()
-
-		fmt.Println("\n🎉 Система полностью готова к работе!")
-		fmt.Println("📱 Бот запущен и ожидает команд:")
-		fmt.Println("   /start - начать работу")
-		fmt.Println("   /help - справка по командам")
-		fmt.Println("   /generate @username - создать пост для канала")
 
 		select {}
 
