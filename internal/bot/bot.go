@@ -225,6 +225,8 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 
 	log.Printf("[GENERATE] Пост сгенерирован, длина: %d символов", len(post))
 
+	b.db.AddGeneration(userID, keywords)
+
 	// ТОЛЬКО ЗДЕСЬ списываем генерацию, когда все этапы успешно пройдены
 	success, err := b.db.UseGeneration(userID)
 	if err != nil || !success {
@@ -408,7 +410,8 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 		text += "⏳ ЗА ВСЕ ВРЕМЯ:\n"
 		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
 			safeInt(allTime["users"]), safeInt(allTime["new_users"]))
-		text += fmt.Sprintf("🚀 Генераций: %d\n", safeInt(allTime["generates"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n",
+			safeInt(allTime["generations"])) // Добавлено
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(allTime["purchases_10"]), safeInt(allTime["purchases_25"]), safeInt(allTime["purchases_100"]))
 		text += fmt.Sprintf("💵 Прибыль: %d руб.\n\n", safeInt(allTime["total_revenue"]))
@@ -419,7 +422,8 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 		text += "📅 ЗА ПОСЛЕДНИЙ МЕСЯЦ:\n"
 		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
 			safeInt(month["users"]), safeInt(month["new_users"]))
-		text += fmt.Sprintf("🚀 Генераций: %d\n", safeInt(month["generates"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n",
+			safeInt(month["generations"])) // Добавлено
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(month["purchases_10"]), safeInt(month["purchases_25"]), safeInt(month["purchases_100"]))
 		text += fmt.Sprintf("💵 Прибыль: %d руб.\n\n", safeInt(month["total_revenue"]))
@@ -430,10 +434,25 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 		text += "🌞 ЗА ПОСЛЕДНИЕ 24 ЧАСА:\n"
 		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
 			safeInt(day["users"]), safeInt(day["new_users"]))
-		text += fmt.Sprintf("🚀 Генераций: %d\n", safeInt(day["generates"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n",
+			safeInt(day["generations"])) // Добавлено
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(day["purchases_10"]), safeInt(day["purchases_25"]), safeInt(day["purchases_100"]))
 		text += fmt.Sprintf("💵 Прибыль: %d руб.", safeInt(day["total_revenue"]))
+	}
+
+	// После вывода основной статистики можно добавить топ тем:
+	topTopics := b.db.GetTopGenerationTopics(time.Time{}, time.Now(), 5)
+	if len(topTopics) > 0 {
+		text += "\n\n🎯 ТОП-5 ПОПУЛЯРНЫХ ТЕМ:\n"
+		i := 1
+		for topic, count := range topTopics {
+			text += fmt.Sprintf("%d. %s - %d раз\n", i, topic, count)
+			i++
+			if i > 5 {
+				break
+			}
+		}
 	}
 
 	b.sendMessage(msg.Chat.ID, text)

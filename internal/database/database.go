@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,18 +29,26 @@ type Purchase struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
+type Generation struct {
+	UserID    int64     `json:"user_id"`
+	Keywords  string    `json:"keywords"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 type Database struct {
-	users     map[int64]*User
-	purchases []Purchase
-	file      string
-	mu        sync.RWMutex
+	users       map[int64]*User
+	purchases   []Purchase
+	generations []Generation
+	file        string
+	mu          sync.RWMutex
 }
 
 func NewDatabase(filename string) *Database {
 	return &Database{
-		users:     make(map[int64]*User),
-		purchases: make([]Purchase, 0),
-		file:      filename,
+		users:       make(map[int64]*User),
+		purchases:   make([]Purchase, 0),
+		generations: make([]Generation, 0),
+		file:        filename,
 	}
 }
 
@@ -69,12 +78,16 @@ func (db *Database) Load() error {
 		json.Unmarshal(purchaseData, &db.purchases)
 	}
 
+	// Загружаем историю генераций
+	generationData, err := os.ReadFile("generations.json")
+	if err == nil && len(generationData) > 0 {
+		json.Unmarshal(generationData, &db.generations)
+	}
+
 	return nil
 }
 
 func (db *Database) save() error {
-	// Функция save НЕ блокирует мьютекс - предполагается, что вызывающая функция уже держит мьютекс
-
 	// Сохраняем пользователей
 	userData, err := json.MarshalIndent(db.users, "", "  ")
 	if err != nil {
@@ -105,8 +118,31 @@ func (db *Database) save() error {
 		return fmt.Errorf("ошибка записи файла покупок: %w", err)
 	}
 
+	// Сохраняем историю генераций
+	generationData, err := json.MarshalIndent(db.generations, "", "  ")
+	if err != nil {
+		log.Printf("[DB] ❌ Ошибка маршалинга истории генераций: %v", err)
+		return fmt.Errorf("ошибка маршалинга истории генераций: %w", err)
+	}
+
+	if err := os.WriteFile("generations.json", generationData, 0644); err != nil {
+		log.Printf("[DB] ❌ Ошибка записи файла истории генераций: %v", err)
+		return fmt.Errorf("ошибка записи файла истории генераций: %w", err)
+	}
+
 	log.Printf("[DB] ✅ Данные успешно сохранены")
 	return nil
+}
+
+func (db *Database) AddGeneration(userID int64, keywords string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	db.generations = append(db.generations, Generation{
+		UserID:    userID,
+		Keywords:  keywords,
+		Timestamp: time.Now(),
+	})
 }
 
 func (db *Database) GetUser(userID int64) *User {
@@ -390,7 +426,7 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 	stats := map[string]interface{}{
 		"users":         0,
 		"new_users":     0,
-		"generates":     0,
+		"generations":   0, // Добавлено
 		"purchases_10":  0,
 		"purchases_25":  0,
 		"purchases_100": 0,
@@ -398,22 +434,6 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 		"revenue_25":    0,
 		"revenue_100":   0,
 		"total_revenue": 0,
-	}
-
-	// Подсчет пользователей и генераций
-	for _, user := range db.users {
-		stats["users"] = stats["users"].(int) + 1
-
-		// Новые пользователи в период
-		if user.CreatedAt.After(from) && (to.IsZero() || user.CreatedAt.Before(to)) {
-			stats["new_users"] = stats["new_users"].(int) + 1
-		}
-
-		// Генерации в период
-		if !user.LastGenerate.IsZero() && user.LastGenerate.After(from) &&
-			(to.IsZero() || user.LastGenerate.Before(to)) {
-			stats["generates"] = stats["generates"].(int) + 1
-		}
 	}
 
 	// Подсчет покупок
@@ -433,9 +453,35 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 		}
 	}
 
+	// Подсчет генераций
+	for _, generation := range db.generations {
+		if generation.Timestamp.After(from) && (to.IsZero() || generation.Timestamp.Before(to)) {
+			stats["generations"] = stats["generations"].(int) + 1
+		}
+	}
+
 	// Итоговая выручка
 	totalRevenue := stats["revenue_10"].(int) + stats["revenue_25"].(int) + stats["revenue_100"].(int)
 	stats["total_revenue"] = totalRevenue
 
 	return stats
+}
+
+func (db *Database) GetTopGenerationTopics(from, to time.Time, limit int) map[string]int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	topics := make(map[string]int)
+
+	for _, generation := range db.generations {
+		if generation.Timestamp.After(from) && (to.IsZero() || generation.Timestamp.Before(to)) {
+			// Очищаем ключевые слова и приводим к нижнему регистру
+			keywords := strings.ToLower(strings.TrimSpace(generation.Keywords))
+			if keywords != "" {
+				topics[keywords]++
+			}
+		}
+	}
+
+	return topics
 }
