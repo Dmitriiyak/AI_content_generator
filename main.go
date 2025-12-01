@@ -2,147 +2,116 @@ package main
 
 import (
 	"AIGenerator/internal/ai"
-	"AIGenerator/internal/analyzer"
-	"AIGenerator/internal/auth"
 	"AIGenerator/internal/bot"
+	"AIGenerator/internal/database"
 	"AIGenerator/internal/news"
-	"AIGenerator/internal/storage"
 	"context"
 	"fmt"
 	"log"
 	"os"
-	"strconv"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
 	"github.com/joho/godotenv"
 )
 
-func Setup_logger() *os.File {
-	file, err := os.OpenFile("logs.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Fatal("Ошибка настройки логгера (см. Setup_logger в main.go)")
-	}
-	return file
-}
-
 func main() {
-	// Настройка логгера
-	log_file := Setup_logger()
-	defer log_file.Close()
-	log.SetOutput(log_file)
-	log.Printf("Логгер успешно запущен!\n")
-
-	// Загружаем переменные окружения
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Ошибка загрузки переменных окружения (см. main.go))")
-	}
-
-	log.Printf("Переменные окружения загружены успешно")
-
-	// Парсим переменные окружения
-	apiID, err := strconv.Atoi(os.Getenv("API_ID"))
+	// Настройка логирования
+	logFile, err := os.OpenFile("logs.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatal("Неверный API_ID (см. main.go): ", err)
+		fmt.Printf("❌ Ошибка создания лог-файла: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
+
+	// Консольный вывод процесса запуска
+	fmt.Println("=========================================")
+	fmt.Println("🚀 ЗАПУСК AI CONTENT GENERATOR")
+	fmt.Println("=========================================")
+
+	// 1. Загрузка переменных окружения
+	fmt.Println("[1/6] Загрузка .env файла...")
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("⚠️  .env файл не найден, проверяю системные переменные")
 	}
 
-	apiHash := os.Getenv("API_HASH")
-	if apiHash == "" {
-		log.Fatal("API_HASH не установлен (см. main.go)")
-	}
-
-	log.Printf("Успешный парсинг переменных окружения")
-
-	// Инициализируем хранилище
-	fmt.Println("🔧 Инициализируем хранилище...")
-	userStorage := storage.NewStorage("users.json")
-	if err := userStorage.Load(); err != nil {
-		log.Printf("⚠️ Ошибка загрузки хранилища: %v", err)
-		fmt.Println("⚠️ Создано новое хранилище")
+	// 2. Инициализация базы данных
+	fmt.Println("[2/6] Инициализация базы данных...")
+	db := database.NewDatabase("users.json")
+	if err := db.Load(); err != nil {
+		fmt.Printf("⚠️  Ошибка загрузки базы: %v\n", err)
+		fmt.Println("📁 Создана новая база данных")
 	} else {
-		fmt.Println("✅ Хранилище загружено успешно")
+		fmt.Println("✅ База данных загружена")
 	}
 
-	// Создаем папку для сессии если её нет
-	if err := os.MkdirAll("tdsession", 0700); err != nil {
-		log.Fatal("Ошибка создания папки сессии: ", err)
+	// 3. Инициализация YandexGPT
+	fmt.Println("[3/6] Инициализация YandexGPT...")
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	yandexAPIKey := os.Getenv("YANDEX_GPT_API_KEY")
+	yandexFolderID := os.Getenv("YANDEX_FOLDER_ID")
+
+	// Проверка обязательных переменных
+	if botToken == "" {
+		fmt.Println("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не установлен")
+		fmt.Println("Добавьте в .env файл: TELEGRAM_BOT_TOKEN=ваш_токен_бота")
+		os.Exit(1)
 	}
 
-	// Создаем клиент Telegram с хранилищем сессии
-	client := telegram.NewClient(apiID, apiHash, telegram.Options{
-		SessionStorage: &session.FileStorage{
-			Path: "tdsession/session.json",
-		},
-	})
-
-	ctx := context.Background()
-
-	// Запускаем клиент и аутентификацию
-	log.Printf("Запускаем Telegram клиент...")
-	if err := client.Run(ctx, func(ctx context.Context) error {
-		if err := auth.Authenticate(ctx, client); err != nil {
-			return fmt.Errorf("аутентификация не удалась: %w", err)
-		}
-
-		log.Printf("Аутентификация завершена успешно")
-		fmt.Println("Аутентификация завершена успешно!")
-
-		// === ИНИЦИАЛИЗАЦИЯ YANDEXGPT КЛИЕНТА ===
-		fmt.Println("\n🔧 Инициализируем YandexGPT клиент...")
-		gptClient, err := ai.NewYandexGPTClient()
-		if err != nil {
-			log.Printf("❌ YandexGPT клиент не создан: %v", err)
-			fmt.Println("❌ YandexGPT клиент не создан. Проверьте переменные в .env:")
-			fmt.Println("   - YANDEX_GPT_API_KEY")
-			fmt.Println("   - YANDEX_FOLDER_ID")
-			log.Fatal("Приложение остановлено")
-		}
-
-		fmt.Println("✅ YandexGPT подключен успешно!")
-
-		// === СОЗДАЕМ АНАЛИЗАТОР КАНАЛОВ И НОВОСТНОЙ АГРЕГАТОР ===
-		fmt.Println("\n🔧 Инициализируем анализатор каналов...")
-		channelAnalyzer := analyzer.NewChannelAnalyzer(nil, gptClient)
-
-		fmt.Println("🔧 Инициализируем новостной агрегатор...")
-		newsAggregator := news.NewNewsAggregator(gptClient)
-		newsAggregator.AddDefaultSources()
-
-		// === ЗАПУСК TELEGRAM БОТА ===
-		fmt.Println("\n🤖 Запускаем Telegram бота...")
-
-		botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-		if botToken == "" {
-			log.Printf("❌ TELEGRAM_BOT_TOKEN не установлен в .env")
-			fmt.Println("❌ TELEGRAM_BOT_TOKEN не установлен. Добавьте в .env:")
-			fmt.Println("   TELEGRAM_BOT_TOKEN=ваш_токен_бота")
-			log.Fatal("Приложение остановлено")
-		}
-
-		// Создаем бота с хранилищем
-		telegramBot, err := bot.New(botToken, channelAnalyzer, newsAggregator, gptClient, userStorage)
-		if err != nil {
-			log.Printf("❌ Ошибка создания бота: %v", err)
-			fmt.Println("❌ Ошибка создания бота:", err)
-			log.Fatal("Приложение остановлено")
-		}
-
-		fmt.Println("✅ Бот успешно создан!")
-
-		// Создаем контекст с отменой для graceful shutdown
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		// Запускаем бота в отдельной горутине
-		go func() {
-			log.Printf("🤖 Запуск Telegram бота...")
-			telegramBot.Start(ctx)
-		}()
-
-		select {}
-
-		return nil
-	}); err != nil {
-		log.Fatalf("Ошибка запуска клиента: %v", err)
+	if yandexAPIKey == "" || yandexFolderID == "" {
+		fmt.Println("❌ ОШИБКА: Переменные YandexGPT не установлены")
+		fmt.Println("Добавьте в .env файл:")
+		fmt.Println("YANDEX_GPT_API_KEY=ваш_api_ключ")
+		fmt.Println("YANDEX_FOLDER_ID=ваш_folder_id")
+		os.Exit(1)
 	}
+
+	gptClient, err := ai.NewYandexGPTClient()
+	if err != nil {
+		fmt.Printf("❌ ОШИБКА: Не удалось создать клиент YandexGPT: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✅ YandexGPT клиент создан")
+
+	// 4. Инициализация новостного агрегатора
+	fmt.Println("[4/6] Инициализация новостного агрегатора...")
+	newsAggregator := news.NewNewsAggregator()
+	newsAggregator.AddDefaultSources()
+	fmt.Println("✅ Новостной агрегатор создан")
+
+	// 5. Создание бота
+	fmt.Println("[5/6] Создание Telegram бота...")
+	telegramBot, err := bot.New(botToken, newsAggregator, gptClient, db)
+	if err != nil {
+		fmt.Printf("❌ ОШИБКА: Не удалось создать бота: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 6. Настройка graceful shutdown
+	fmt.Println("[6/6] Настройка graceful shutdown...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Обработка сигналов завершения
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Запуск бота в отдельной горутине
+	go func() {
+		fmt.Println("=========================================")
+		fmt.Println("✅ ВСЕ СИСТЕМЫ ЗАПУЩЕНЫ УСПЕШНО!")
+		fmt.Println("✨ Ожидание команд...")
+		fmt.Println("=========================================")
+		log.Println("[STARTUP] Бот успешно запущен")
+		telegramBot.Start(ctx)
+	}()
+
+	// Ожидание сигнала завершения
+	<-sigChan
+	fmt.Println("\n🔄 Получен сигнал завершения...")
+	cancel()
+	time.Sleep(2 * time.Second)
+	fmt.Println("👋 Бот завершил работу")
 }

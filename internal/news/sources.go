@@ -11,9 +11,8 @@ import (
 
 // RSSSource представляет RSS-ленту как источник новостей
 type RSSSource struct {
-	Name       string
-	URL        string
-	Categories []string
+	Name string
+	URL  string
 }
 
 // RSS структура для парсинга RSS-лент
@@ -34,10 +33,6 @@ func (r *RSSSource) GetName() string {
 	return r.Name
 }
 
-func (r *RSSSource) GetCategories() []string {
-	return r.Categories
-}
-
 func (r *RSSSource) FetchArticles() ([]Article, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", r.URL, nil)
@@ -45,7 +40,6 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
 	}
 
-	// Добавляем заголовки чтобы избежать блокировок
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	resp, err := client.Do(req)
@@ -70,15 +64,13 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 
 	var articles []Article
 	for _, item := range rss.Channel.Item {
-		// Парсим дату публикации
 		pubDate, err := parseDate(item.PubDate)
 		if err != nil {
-			// Если дату не распарсить, используем текущую
 			pubDate = time.Now()
 		}
 
-		// Пропускаем старые новости (больше 2 дней)
-		if time.Since(pubDate) > 48*time.Hour {
+		// Пропускаем старые новости (больше 3 дней)
+		if time.Since(pubDate) > 72*time.Hour {
 			continue
 		}
 
@@ -99,17 +91,34 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 
 // cleanText очищает текст от HTML тегов и лишних пробелов
 func cleanText(text string) string {
-	// Простая очистка - убираем множественные пробелы и обрезаем
 	text = strings.TrimSpace(text)
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\t", " ")
+	text = strings.ReplaceAll(text, "<br>", "\n")
+	text = strings.ReplaceAll(text, "<br/>", "\n")
+	text = strings.ReplaceAll(text, "<br />", "\n")
+
+	// Убираем HTML теги
+	var result strings.Builder
+	inTag := false
+	for _, ch := range text {
+		if ch == '<' {
+			inTag = true
+		} else if ch == '>' {
+			inTag = false
+		} else if !inTag {
+			result.WriteRune(ch)
+		}
+	}
+
+	text = result.String()
 
 	// Убираем множественные пробелы
 	for strings.Contains(text, "  ") {
 		text = strings.ReplaceAll(text, "  ", " ")
 	}
 
-	return text
+	return strings.TrimSpace(text)
 }
 
 // parseDate пытается распарсить различные форматы дат
@@ -136,86 +145,31 @@ func parseDate(dateStr string) (time.Time, error) {
 		}
 	}
 
-	return time.Now(), nil // Возвращаем текущее время если не удалось распарсить
+	return time.Now(), nil
 }
 
-// GetDefaultSources возвращает расширенный список RSS-лент
+// GetDefaultSources возвращает список RSS-лент
 func GetDefaultSources() []RSSSource {
 	return []RSSSource{
 		{
-			Name:       "РИА Новости",
-			URL:        "https://ria.ru/export/rss2/index.xml",
-			Categories: []string{"новости", "политика", "экономика"},
+			Name: "РИА Новости",
+			URL:  "https://ria.ru/export/rss2/index.xml",
 		},
 		{
-			Name:       "Коммерсант",
-			URL:        "https://www.kommersant.ru/RSS/news.xml",
-			Categories: []string{"новости", "бизнес", "экономика"},
+			Name: "Коммерсант",
+			URL:  "https://www.kommersant.ru/RSS/news.xml",
 		},
 		{
-			Name:       "ТАСС",
-			URL:        "https://tass.ru/rss/v2.xml",
-			Categories: []string{"новости", "политика", "общество"},
+			Name: "ТАСС",
+			URL:  "https://tass.ru/rss/v2.xml",
 		},
 		{
-			Name:       "VC.ru",
-			URL:        "https://vc.ru/rss",
-			Categories: []string{"технологии", "бизнес", "стартапы"},
+			Name: "VC.ru",
+			URL:  "https://vc.ru/rss",
 		},
 		{
-			Name:       "Хабрахабр",
-			URL:        "https://habr.com/ru/rss/articles/?fl=ru",
-			Categories: []string{"технологии", "программирование", "it"},
-		},
-		{
-			Name:       "РБК",
-			URL:        "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-			Categories: []string{"новости", "бизнес", "финансы"},
-		},
-		{
-			Name:       "CNews",
-			URL:        "https://www.cnews.ru/inc/rss/news.xml",
-			Categories: []string{"технологии", "it", "гаджеты"},
-		},
-		{
-			Name:       "3DNews",
-			URL:        "https://3dnews.ru/news/rss/",
-			Categories: []string{"технологии", "железо", "гаджеты"},
-		},
-		{
-			Name:       "IXBT",
-			URL:        "https://www.ixbt.com/export/news.rss",
-			Categories: []string{"технологии", "железо", "обзоры"},
-		},
-		{
-			Name:       "Ferra",
-			URL:        "https://www.ferra.ru/exports/rss/",
-			Categories: []string{"технологии", "гаджеты", "игры"},
-		},
-		{
-			Name:       "Российская Газета",
-			URL:        "https://rg.ru/export/rss/lenta.xml",
-			Categories: []string{"новости", "политика", "общество"},
-		},
-		{
-			Name:       "Lenta.ru",
-			URL:        "https://lenta.ru/rss",
-			Categories: []string{"новости", "политика", "экономика"},
-		},
-		{
-			Name:       "Meduza",
-			URL:        "https://meduza.io/rss/all",
-			Categories: []string{"новости", "политика", "общество"},
-		},
-		{
-			Name:       "Forbes",
-			URL:        "https://www.forbes.ru/newrss.xml",
-			Categories: []string{"бизнес", "финансы", "экономика"},
-		},
-		{
-			Name:       "Ведомости",
-			URL:        "https://www.vedomosti.ru/rss/news",
-			Categories: []string{"бизнес", "экономика", "финансы"},
+			Name: "Хабрахабр",
+			URL:  "https://habr.com/ru/rss/articles/?fl=ru",
 		},
 	}
 }

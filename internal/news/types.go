@@ -13,12 +13,10 @@ type Article struct {
 	PublishedAt time.Time `json:"published_at"`
 	Source      string    `json:"source"`
 	Category    string    `json:"category"`
-	Relevance   float64   `json:"relevance"` // релевантность для канала (0-1)
 }
 
 // NewsSource представляет источник новостей
 type NewsSource interface {
 	FetchArticles() ([]Article, error)
 	GetName() string
-	GetCategories() []string
 }

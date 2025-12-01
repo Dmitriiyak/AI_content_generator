@@ -1,9 +1,19 @@
+# Файлы базы данных
+users.json
+purchases.json
+
+# Файлы окружения
 .env
 .env*
 *.env
 
+# Логи
 logs.txt
+*.log
 
-*.json
-*.key
-tdsession/
+# Бинарные файлы
+AIGenerator
+AIGenerator.exe
+
+# Временные файлы
+*.tmp
