@@ -1,6 +1,7 @@
 # Файлы базы данных
 users.json
 purchases.json
+generations.json
 
 # Файлы окружения
 .env
