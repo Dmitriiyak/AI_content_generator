@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"AIGenerator/internal/ai"
 	"AIGenerator/internal/database"
@@ -21,9 +22,10 @@ type Bot struct {
 	gptClient      *ai.YandexGPTClient
 	db             *database.Database
 	mu             sync.Mutex
+	adminChatID    int64
 }
 
-func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.YandexGPTClient, db *database.Database) (*Bot, error) {
+func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.YandexGPTClient, db *database.Database, adminChatID int64) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка создания бота: %w", err)
@@ -35,6 +37,7 @@ func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.Yandex
 		newsAggregator: newsAggregator,
 		gptClient:      gptClient,
 		db:             db,
+		adminChatID:    adminChatID,
 	}, nil
 }
 
@@ -66,6 +69,12 @@ func (b *Bot) Start(ctx context.Context) {
 			continue
 		}
 
+		// Обработка отзыва (если пользователь в состоянии ожидания отзыва)
+		if b.db.IsUserPendingFeedback(update.Message.Chat.ID) {
+			go b.handleFeedbackText(update.Message)
+			continue
+		}
+
 		// УБРАНО: обработка обычных текстовых сообщений
 		// Теперь только команда /generate
 		b.sendMessage(update.Message.Chat.ID,
@@ -94,6 +103,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleBalance(msg)
 	case "statistics":
 		b.handleStatistics(msg)
+	case "feedback":
+		b.handleFeedbackCommand(msg)
+	case "cancel":
+		b.handleCancelCommand(msg)
 	default:
 		b.sendMessage(msg.Chat.ID, "❌ Неизвестная команда. Используйте /help для списка команд.")
 	}
@@ -221,6 +234,9 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 		return
 	}
 
+	// Увеличиваем счетчик генераций для напоминания об отзыве
+	b.db.IncrementGenerationsCount(userID)
+
 	// Все шаги завершены успешно
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
 		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n✅ Шаг 4/4: ✓ Статья выбрана\n✅ Генерация завершена\n\n✨ Все этапы завершены! Отправляю результат...",
@@ -250,6 +266,15 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 		user.AvailableGenerations)
 
 	b.sendMessageWithMarkdown(userID, metadata)
+
+	// 3. Отправляем кнопки для оценки качества
+	b.sendRatingRequest(userID, keywords)
+
+	// 4. Проверяем, нужно ли напомнить об отзыве
+	if b.db.ShouldRemindFeedback(userID) {
+		b.sendFeedbackReminder(userID)
+	}
+
 	log.Printf("[GENERATE] ✅ Завершена обработка запроса от %d", userID)
 }
 
@@ -280,6 +305,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 /generate - создать пост по ключевым словам
 /balance - проверить баланс генераций  
 /buy - приобрести дополнительные генерации
+/feedback - оставить отзыв о работе бота
 /help - показать справку
 
 🎯 У вас есть %d бесплатных генераций!
@@ -297,6 +323,7 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message) {
 /generate - создать пост по ключевым словам
 /balance - проверить баланс
 /buy - купить генерации
+/feedback - оставить отзыв о работе бота
 /help - эта справка
 
 📝 Как использовать:
@@ -412,13 +439,139 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	b.sendMessage(msg.Chat.ID, text)
 }
 
+func (b *Bot) handleFeedbackCommand(msg *tgbotapi.Message) {
+	userID := msg.Chat.ID
+
+	// Устанавливаем состояние ожидания отзыва
+	b.db.SetPendingFeedback(userID, true)
+
+	text := `📝 Оставьте отзыв о работе бота
+
+Пожалуйста, напишите ваш отзыв, предложения или замечания по работе бота.
+
+Ваш отзыв поможет нам стать лучше!
+
+Если передумали, используйте команду /cancel`
+
+	b.sendMessage(userID, text)
+}
+
+func (b *Bot) handleCancelCommand(msg *tgbotapi.Message) {
+	userID := msg.Chat.ID
+
+	if !b.db.IsUserPendingFeedback(userID) {
+		b.sendMessage(userID, "❌ У вас нет активного запроса на отзыв.")
+		return
+	}
+
+	// Сбрасываем состояние ожидания отзыва
+	b.db.SetPendingFeedback(userID, false)
+	b.db.ResetGenerationsCount(userID)
+
+	b.sendMessage(userID, "✅ Отправка отзыва отменена.")
+}
+
+func (b *Bot) handleFeedbackText(msg *tgbotapi.Message) {
+	userID := msg.Chat.ID
+	feedbackText := msg.Text
+
+	if !b.db.IsUserPendingFeedback(userID) {
+		return
+	}
+
+	// Отправляем отзыв админу
+	username := "Без имени"
+	if msg.From != nil && msg.From.UserName != "" {
+		username = "@" + msg.From.UserName
+	} else if msg.From != nil && msg.From.FirstName != "" {
+		username = msg.From.FirstName
+		if msg.From.LastName != "" {
+			username += " " + msg.From.LastName
+		}
+	}
+
+	adminMessage := fmt.Sprintf(
+		"📨 *НОВЫЙ ОТЗЫВ*\n\n"+
+			"👤 Пользователь: %s\n"+
+			"🆔 ID: %d\n"+
+			"📅 Дата: %s\n\n"+
+			"💬 Отзыв:\n%s",
+		username,
+		userID,
+		time.Now().Format("02.01.2006 15:04"),
+		feedbackText)
+
+	b.sendMessageWithMarkdown(b.adminChatID, adminMessage)
+
+	// Сбрасываем состояние ожидания отзыва
+	b.db.SetPendingFeedback(userID, false)
+	b.db.ResetGenerationsCount(userID)
+
+	// Отправляем благодарность пользователю
+	b.sendMessage(userID, "✅ Спасибо за ваш отзыв! Это очень ценно для нас! 🙏")
+}
+
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	// Отвечаем на callback
 	_, _ = b.api.Request(tgbotapi.NewCallback(callback.ID, ""))
 
 	if strings.HasPrefix(callback.Data, "buy_") {
 		b.handlePurchase(callback.Message.Chat.ID, callback.Data)
+	} else if strings.HasPrefix(callback.Data, "rate_") {
+		b.handleRating(callback)
 	}
+}
+
+func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
+	userID := callback.Message.Chat.ID
+	data := callback.Data // Формат: rate_X_topic
+
+	// Парсим оценку и тему
+	parts := strings.SplitN(data, "_", 3)
+	if len(parts) != 3 {
+		return
+	}
+
+	rating, err := strconv.Atoi(parts[1])
+	if err != nil || rating < 1 || rating > 5 {
+		return
+	}
+
+	topic := parts[2]
+
+	// Получаем информацию о пользователе
+	username := "Без имени"
+	if callback.From != nil && callback.From.UserName != "" {
+		username = "@" + callback.From.UserName
+	} else if callback.From != nil && callback.From.FirstName != "" {
+		username = callback.From.FirstName
+		if callback.From.LastName != "" {
+			username += " " + callback.From.LastName
+		}
+	}
+
+	// Отправляем оценку админу
+	adminMessage := fmt.Sprintf(
+		"⭐️ *НОВАЯ ОЦЕНКА*\n\n"+
+			"👤 Пользователь: %s\n"+
+			"🆔 ID: %d\n"+
+			"🎯 Тема генерации: %s\n"+
+			"📅 Дата: %s\n\n"+
+			"⭐️ Оценка: %d/5",
+		username,
+		userID,
+		topic,
+		time.Now().Format("02.01.2006 15:04"),
+		rating)
+
+	b.sendMessageWithMarkdown(b.adminChatID, adminMessage)
+
+	// Обновляем сообщение с кнопками
+	b.editMessage(callback.Message.Chat.ID, callback.Message.MessageID,
+		"✅ Спасибо за вашу оценку! Ваше мнение важно для нас! ⭐️")
+
+	// Уведомляем пользователя
+	b.sendMessage(userID, fmt.Sprintf("✅ Спасибо за оценку %d/5! Ваше мнение помогает нам становиться лучше! 🙌", rating))
 }
 
 func (b *Bot) handlePurchase(chatID int64, packageType string) {
@@ -470,6 +623,37 @@ func (b *Bot) createBuyMenu() tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("100 генераций - 499р", "buy_100"),
 		),
 	)
+}
+
+func (b *Bot) sendRatingRequest(chatID int64, topic string) {
+	text := "⭐️ Оцените качество генерации:"
+
+	// Создаем кнопки оценки от 1 до 5
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("1 ⭐", fmt.Sprintf("rate_1_%s", topic)),
+			tgbotapi.NewInlineKeyboardButtonData("2 ⭐", fmt.Sprintf("rate_2_%s", topic)),
+			tgbotapi.NewInlineKeyboardButtonData("3 ⭐", fmt.Sprintf("rate_3_%s", topic)),
+			tgbotapi.NewInlineKeyboardButtonData("4 ⭐", fmt.Sprintf("rate_4_%s", topic)),
+			tgbotapi.NewInlineKeyboardButtonData("5 ⭐", fmt.Sprintf("rate_5_%s", topic)),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = keyboard
+	b.api.Send(msg)
+}
+
+func (b *Bot) sendFeedbackReminder(chatID int64) {
+	text := `💬 *Небольшая просьба!*
+
+Вы уже использовали несколько генераций. Пожалуйста, помогите нам стать лучше!
+
+Если у вас есть минутка, оставьте отзыв о работе бота командой /feedback
+
+Ваше мнение очень важно для нас! 🙏`
+
+	b.sendMessageWithMarkdown(chatID, text)
 }
 
 func (b *Bot) sendMessage(chatID int64, text string) tgbotapi.Message {
