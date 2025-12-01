@@ -16,6 +16,9 @@ type User struct {
 	TotalGenerations     int       `json:"total_generations"`
 	CreatedAt            time.Time `json:"created_at"`
 	LastGenerate         time.Time `json:"last_generate"`
+	PendingFeedback      bool      `json:"pending_feedback,omitempty"`
+	GenerationsCount     int       `json:"generations_count,omitempty"`
+	LastFeedbackReminder time.Time `json:"last_feedback_reminder,omitempty"`
 }
 
 type Purchase struct {
@@ -118,6 +121,9 @@ func (db *Database) GetUser(userID int64) *User {
 			TotalGenerations:     user.TotalGenerations,
 			CreatedAt:            user.CreatedAt,
 			LastGenerate:         user.LastGenerate,
+			PendingFeedback:      user.PendingFeedback,
+			GenerationsCount:     user.GenerationsCount,
+			LastFeedbackReminder: user.LastFeedbackReminder,
 		}
 	}
 
@@ -127,6 +133,7 @@ func (db *Database) GetUser(userID int64) *User {
 		AvailableGenerations: 10,
 		TotalGenerations:     0,
 		CreatedAt:            time.Now(),
+		GenerationsCount:     0,
 	}
 }
 
@@ -152,6 +159,7 @@ func (db *Database) UseGeneration(userID int64) (bool, error) {
 			AvailableGenerations: 10,
 			TotalGenerations:     0,
 			CreatedAt:            time.Now(),
+			GenerationsCount:     0,
 		}
 		db.users[userID] = user
 	}
@@ -179,6 +187,85 @@ func (db *Database) UseGeneration(userID int64) (bool, error) {
 	return true, nil
 }
 
+func (db *Database) IncrementGenerationsCount(userID int64) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	user, exists := db.users[userID]
+	if !exists {
+		return
+	}
+
+	user.GenerationsCount++
+	db.save()
+}
+
+func (db *Database) ResetGenerationsCount(userID int64) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	user, exists := db.users[userID]
+	if !exists {
+		return
+	}
+
+	user.GenerationsCount = 0
+	db.save()
+}
+
+func (db *Database) SetPendingFeedback(userID int64, pending bool) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	user, exists := db.users[userID]
+	if !exists {
+		user = &User{
+			UserID:               userID,
+			AvailableGenerations: 10,
+			TotalGenerations:     0,
+			CreatedAt:            time.Now(),
+			GenerationsCount:     0,
+		}
+		db.users[userID] = user
+	}
+
+	user.PendingFeedback = pending
+	db.save()
+}
+
+func (db *Database) IsUserPendingFeedback(userID int64) bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	user, exists := db.users[userID]
+	if !exists {
+		return false
+	}
+
+	return user.PendingFeedback
+}
+
+func (db *Database) ShouldRemindFeedback(userID int64) bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	user, exists := db.users[userID]
+	if !exists {
+		return false
+	}
+
+	// Напоминаем каждые 3 генерации
+	if user.GenerationsCount >= 3 && !user.PendingFeedback {
+		// Проверяем, когда последний раз напоминали
+		if time.Since(user.LastFeedbackReminder) > 24*time.Hour {
+			user.LastFeedbackReminder = time.Now()
+			return true
+		}
+	}
+
+	return false
+}
+
 func (db *Database) AddPurchase(userID int64, packageType string, price int) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -202,6 +289,7 @@ func (db *Database) AddPurchase(userID int64, packageType string, price int) err
 			AvailableGenerations: 10,
 			TotalGenerations:     0,
 			CreatedAt:            time.Now(),
+			GenerationsCount:     0,
 		}
 		db.users[userID] = user
 	}
@@ -246,6 +334,7 @@ func (db *Database) AddGenerations(userID int64, count int) error {
 			AvailableGenerations: 10,
 			TotalGenerations:     0,
 			CreatedAt:            time.Now(),
+			GenerationsCount:     0,
 		}
 		db.users[userID] = user
 	}

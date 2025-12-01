@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ func main() {
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	yandexAPIKey := os.Getenv("YANDEX_GPT_API_KEY")
 	yandexFolderID := os.Getenv("YANDEX_FOLDER_ID")
+	adminChatIDStr := os.Getenv("ADMIN_CHAT_ID")
 
 	// Проверка обязательных переменных
 	if botToken == "" {
@@ -66,6 +68,21 @@ func main() {
 		fmt.Println("YANDEX_GPT_API_KEY=ваш_api_ключ")
 		fmt.Println("YANDEX_FOLDER_ID=ваш_folder_id")
 		os.Exit(1)
+	}
+
+	if adminChatIDStr == "" {
+		fmt.Println("⚠️  ADMIN_CHAT_ID не установлен, отзывы и оценки не будут отправляться")
+	}
+
+	// Преобразуем ADMIN_CHAT_ID в int64
+	var adminChatID int64 = 0
+	if adminChatIDStr != "" {
+		if id, err := strconv.ParseInt(adminChatIDStr, 10, 64); err == nil {
+			adminChatID = id
+			fmt.Printf("✅ ADMIN_CHAT_ID: %d\n", adminChatID)
+		} else {
+			fmt.Printf("⚠️  Неверный формат ADMIN_CHAT_ID: %s\n", adminChatIDStr)
+		}
 	}
 
 	gptClient, err := ai.NewYandexGPTClient()
@@ -83,7 +100,7 @@ func main() {
 
 	// 5. Создание бота
 	fmt.Println("[5/6] Создание Telegram бота...")
-	telegramBot, err := bot.New(botToken, newsAggregator, gptClient, db)
+	telegramBot, err := bot.New(botToken, newsAggregator, gptClient, db, adminChatID)
 	if err != nil {
 		fmt.Printf("❌ ОШИБКА: Не удалось создать бота: %v\n", err)
 		os.Exit(1)

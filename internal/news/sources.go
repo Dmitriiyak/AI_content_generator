@@ -276,7 +276,7 @@ func GetDefaultSources() []RSSSource {
 		},
 		{
 			Name:        "Чемпионат",
-			URL:         "https://www.championat.com/rss/news/football.html",
+			URL:         "https://www.championat.com/rss/news/football",
 			Category:    "Спорт",
 			Subcategory: "Футбол",
 			Language:    "ru",
@@ -295,7 +295,13 @@ func GetDefaultSources() []RSSSource {
 			Subcategory: "Разное",
 			Language:    "ru",
 		},
-
+		{
+			Name:        "Berni",
+			URL:         "http://www.berni.ru/feed/atom/",
+			Category:    "Спорт",
+			Subcategory: "Автоспорт",
+			Language:    "ru",
+		},
 		// Путешествия
 		{
 			Name:        "Турпром",
