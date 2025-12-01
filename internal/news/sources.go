@@ -299,7 +299,7 @@ func GetDefaultSources() []RSSSource {
 			Name:        "Berni",
 			URL:         "http://www.berni.ru/feed/atom/",
 			Category:    "Спорт",
-			Subcategory: "Автоспорт",
+			Subcategory: "Разное",
 			Language:    "ru",
 		},
 		// Путешествия
