@@ -117,7 +117,7 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 
 	log.Printf("[GENERATE] Начало обработки запроса от %d: %s", userID, keywords)
 
-	// Проверяем доступные генерации
+	// Проверяем доступные генерации (только проверка, без списания)
 	user := b.db.GetUser(userID)
 	log.Printf("[GENERATE] Пользователь %d: доступно %d генераций", userID, user.AvailableGenerations)
 
@@ -126,19 +126,8 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 		return
 	}
 
-	// Используем одну генерацию
-	success, err := b.db.UseGeneration(userID)
-	if err != nil || !success {
-		log.Printf("[GENERATE] Ошибка использования генерации: %v", err)
-		b.sendMessage(userID, "❌ Ошибка системы. Попробуйте позже.")
-		return
-	}
-
-	log.Printf("[GENERATE] Генерация использована, осталось: %d", user.AvailableGenerations-1)
-
-	// Шаг 1: Начало процесса - ОТПРАВЛЯЕМ СООБЩЕНИЕ НАВСЕГДА
+	// Шаг 1: Начало процесса
 	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n⏳ Шаг 1/4: Проверяю доступные генерации...", keywords))
-	log.Printf("[GENERATE] Отправлено первое сообщение, ID: %d", step1Msg.MessageID)
 
 	// Шаг 2: Определение категории
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
@@ -150,8 +139,9 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	category, subcategory, err := b.gptClient.ClassifyQuery(ctx, keywords)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка определения категории: %v", err)
-		category = "Общее"
-		subcategory = "Новости"
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка определения категории\n\n💡 Генерация не списана", keywords))
+		return
 	}
 
 	log.Printf("[GENERATE] Категория определена: %s/%s", category, subcategory)
@@ -168,9 +158,7 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка при поиске новостей: %v", err)
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей", keywords))
-		// Возвращаем генерацию
-		b.db.AddGenerations(userID, 1)
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей\n\n💡 Генерация не списана", keywords))
 		return
 	}
 
@@ -178,81 +166,65 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 
 	if len(articles) == 0 {
 		log.Printf("[GENERATE] ❌ Не найдено новостей по запросу: %s", keywords)
-		if step1Msg.MessageID > 0 {
-			b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-				fmt.Sprintf("❌ Новости не найдены\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не найдено подходящих новостей по теме", keywords))
-		} else {
-			b.sendMessage(userID, fmt.Sprintf("❌ Новости не найдены\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не найдено подходящих новостей по теме", keywords))
-		}
-		// Возвращаем генерацию
-		b.db.AddGenerations(userID, 1)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Новости не найдены\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не найдено подходящих новостей по теме\n\n💡 Генерация не списана", keywords))
 		return
 	}
 
-	// Шаг 3: Новости найдены
-	if step1Msg.MessageID > 0 {
-		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n⏳ Шаг 3/4: Выбираю лучшую статью...", keywords, len(articles)))
-	} else {
-		step1Msg = b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n⏳ Шаг 3/4: Выбираю лучшую статью...", keywords, len(articles)))
-	}
+	// Шаг 4: Новости найдены
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n⏳ Шаг 4/4: Выбираю лучшую статью...",
+			keywords, category, subcategory, len(articles)))
 
-	log.Printf("[GENERATE] Шаг 3/4: Выбрана статья: %s", articles[0].Title)
+	log.Printf("[GENERATE] Шаг 4/4: Выбрана статья: %s", articles[0].Title)
 
 	// Генерируем пост через GPT
 	article := articles[0]
 	articleInfo := ai.ArticleInfo{
-		Title:   article.Title,
-		Summary: article.Summary,
-		URL:     article.URL,
-		Source:  article.Source,
+		Title:       article.Title,
+		Summary:     article.Summary,
+		URL:         article.URL,
+		Source:      article.Source,
+		Category:    article.Category,
+		Subcategory: article.Subcategory,
 	}
 
-	// Шаг 4: Генерация через AI
-	if step1Msg.MessageID > 0 {
-		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n✅ Шаг 3/4: ✓ Статья выбрана\n⏳ Шаг 4/4: Генерация поста через AI...", keywords, len(articles)))
-	} else {
-		step1Msg = b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n✅ Шаг 3/4: ✓ Статья выбрана\n⏳ Шаг 4/4: Генерация поста через AI...", keywords, len(articles)))
-	}
+	// Шаг 5: Генерация через AI
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n✅ Шаг 4/4: ✓ Статья выбрана\n⏳ Генерация поста через AI...",
+			keywords, category, subcategory, len(articles)))
 
-	log.Printf("[GENERATE] Шаг 4/4: Генерация поста через AI...")
+	log.Printf("[GENERATE] Генерация поста через AI...")
 	post, err := b.gptClient.GeneratePost(ctx, keywords, articleInfo)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка генерации поста для темы: %s, ошибка: %v", keywords, err)
-		if step1Msg.MessageID > 0 {
-			b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-				fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста", keywords))
-		} else {
-			b.sendMessage(userID, fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста", keywords))
-		}
-		// Возвращаем генерацию
-		b.db.AddGenerations(userID, 1)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста\n\n💡 Генерация не списана", keywords))
 		return
 	}
 
 	if strings.TrimSpace(post) == "" {
 		log.Printf("[GENERATE] ❌ Получен пустой пост")
-		if step1Msg.MessageID > 0 {
-			b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-				fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост", keywords))
-		} else {
-			b.sendMessage(userID, fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост", keywords))
-		}
-		// Возвращаем генерацию
-		b.db.AddGenerations(userID, 1)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост\n\n💡 Генерация не списана", keywords))
 		return
 	}
 
-	log.Printf("[GENERATE] Шаг 4/4: Пост сгенерирован, длина: %d символов", len(post))
+	log.Printf("[GENERATE] Пост сгенерирован, длина: %d символов", len(post))
+
+	// ТОЛЬКО ЗДЕСЬ списываем генерацию, когда все этапы успешно пройдены
+	success, err := b.db.UseGeneration(userID)
+	if err != nil || !success {
+		log.Printf("[GENERATE] ❌ Ошибка списания генерации: %v", err)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка системы\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при списании генерации", keywords))
+		return
+	}
 
 	// Все шаги завершены успешно
-	if step1Msg.MessageID > 0 {
-		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n✅ Шаг 3/4: ✓ Статья выбрана\n✅ Шаг 4/4: ✓ Пост сгенерирован\n\n✨ Все этапы завершены! Отправляю результат...", keywords, len(articles)))
-	} else {
-		b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Найдено %d новостей\n✅ Шаг 3/4: ✓ Статья выбрана\n✅ Шаг 4/4: ✓ Пост сгенерирован\n\n✨ Все этапы завершены! Отправляю результат...", keywords, len(articles)))
-	}
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n✅ Шаг 4/4: ✓ Статья выбрана\n✅ Генерация завершена\n\n✨ Все этапы завершены! Отправляю результат...",
+			keywords, category, subcategory, len(articles)))
 
 	// Логируем успех
 	log.Printf("[GENERATE] ✅ Успешная генерация поста для темы: %s, источник: %s, ссылка: %s",
@@ -260,18 +232,41 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 
 	// Отправляем результат
 	user = b.db.GetUser(userID)
-	successText := fmt.Sprintf(
-		"✅ Пост готов!\n\n"+
-			"🎯 Тема: %s\n"+
-			"📰 Источник: %s\n"+
-			"🔗 Ссылка: %s\n"+
-			"✨ Осталось генераций: %d\n\n"+
-			"📋 Сгенерированный пост:",
-		keywords, article.Source, article.URL, user.AvailableGenerations)
 
-	b.sendMessage(userID, successText)
-	b.sendMessage(userID, post)
+	// 1. Отправляем сгенерированный пост с Markdown разметкой
+	b.sendMessageWithMarkdown(userID, post)
+
+	// 2. Отправляем метаданные отдельным сообщением
+	hashtags := b.generateHashtags(article)
+	metadata := fmt.Sprintf(
+		"📋 *Метаданные для поста (добавьте по желанию):*\n\n"+
+			"🔖 *Рекомендуемые хештеги:*\n"+
+			"%s\n\n"+
+			"📰 *Источник:* [Новость](%s) взята с %s\n\n"+
+			"✨ *Осталось генераций:* %d",
+		hashtags,
+		article.URL,
+		article.Source,
+		user.AvailableGenerations)
+
+	b.sendMessageWithMarkdown(userID, metadata)
 	log.Printf("[GENERATE] ✅ Завершена обработка запроса от %d", userID)
+}
+
+// Функция для отправки сообщений с Markdown
+func (b *Bot) sendMessageWithMarkdown(chatID int64, text string) tgbotapi.Message {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	msg.DisableWebPagePreview = true
+
+	message, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки сообщения с Markdown: %v", err)
+		// Пробуем отправить без Markdown
+		return b.sendMessage(chatID, text)
+	}
+	log.Printf("[MESSAGE] Отправлено сообщение с Markdown в чат %d, ID: %d", chatID, message.MessageID)
+	return message
 }
 
 func (b *Bot) handleStart(msg *tgbotapi.Message) {
@@ -543,4 +538,42 @@ func safeInt(value interface{}) int {
 	default:
 		return 0
 	}
+}
+
+func (b *Bot) generateHashtags(article news.Article) string {
+	// Базовые хештеги на основе категории
+	baseHashtags := map[string][]string{
+		"IT и Технологии":        {"технологии", "инновации", "гаджеты", "AI"},
+		"Бизнес и Финансы":       {"бизнес", "финансы", "экономика", "стартапы"},
+		"Спорт":                  {"спорт", "новости", "соревнования"},
+		"Путешествия и Туризм":   {"путешествия", "туризм", "отдых"},
+		"Наука и Образование":    {"наука", "образование", "исследования"},
+		"Развлечения и Культура": {"культура", "искусство", "развлечения"},
+		"Общество и Политика":    {"общество", "политика", "новости"},
+		"Здоровье и Спорт":       {"здоровье", "медицина", "фитнес"},
+	}
+
+	// Получаем хештеги для категории
+	hashtags, exists := baseHashtags[article.Category]
+	if !exists {
+		hashtags = []string{"новости", "интересное"}
+	}
+
+	// Добавляем подкатегорию как хештег
+	if article.Subcategory != "" {
+		subcatHashtag := strings.ToLower(strings.ReplaceAll(article.Subcategory, " ", ""))
+		hashtags = append([]string{subcatHashtag}, hashtags...)
+	}
+
+	// Форматируем хештеги
+	var result strings.Builder
+	for i, tag := range hashtags {
+		if i > 0 {
+			result.WriteString(" ")
+		}
+		result.WriteString("#")
+		result.WriteString(tag)
+	}
+
+	return result.String()
 }

@@ -403,5 +403,38 @@ func GetDefaultSources() []RSSSource {
 			Subcategory: "Здоровье",
 			Language:    "ru",
 		},
+		// Автомобили
+		{
+			Name:        "Auto.ru",
+			URL:         "https://auto.ru/rss/news/",
+			Category:    "Автомобили",
+			Subcategory: "Новинки",
+			Language:    "ru",
+		},
+		{
+			Name:        "За рулем",
+			URL:         "https://www.zr.ru/rss/",
+			Category:    "Автомобили",
+			Subcategory: "Тест-драйвы",
+			Language:    "ru",
+		},
+
+		// Еда
+		{
+			Name:        "Gastronom.ru",
+			URL:         "https://www.gastronom.ru/rss",
+			Category:    "Еда и Рестораны",
+			Subcategory: "Рецепты",
+			Language:    "ru",
+		},
+
+		// Мода
+		{
+			Name:        "Vogue",
+			URL:         "https://www.vogue.ru/rss",
+			Category:    "Мода и Стиль",
+			Subcategory: "Одежда",
+			Language:    "ru",
+		},
 	}
 }
