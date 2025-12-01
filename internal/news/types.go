@@ -13,10 +13,15 @@ type Article struct {
 	PublishedAt time.Time `json:"published_at"`
 	Source      string    `json:"source"`
 	Category    string    `json:"category"`
+	Subcategory string    `json:"subcategory"`
+	Tags        []string  `json:"tags"`
+	Language    string    `json:"language"`
 }
 
 // NewsSource представляет источник новостей
 type NewsSource interface {
 	FetchArticles() ([]Article, error)
 	GetName() string
+	GetCategory() string
+	GetSubcategory() string
 }

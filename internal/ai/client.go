@@ -77,34 +77,65 @@ func NewYandexGPTClient() (*YandexGPTClient, error) {
 	}, nil
 }
 
+// GeneratePost генерирует пост в стиле примеров
 func (c *YandexGPTClient) GeneratePost(ctx context.Context, keywords string, article ArticleInfo) (string, error) {
-	log.Printf("[AI] Начало генерации поста по теме: %s", keywords)
+	log.Printf("[AI] Генерация поста по теме: %s", keywords)
 
 	prompt := fmt.Sprintf(`
-СОЗДАЙ КАЧЕСТВЕННЫЙ TELEGRAM ПОСТ
+ТЫ: Копирайтер Telegram-канала "Бэкдор". Ты пишешь виральные, цепляющие посты в формате:
 
+⚡️ ЗАГОЛОВОК — кратко, провокационно, с эмодзи в начале
+ТЕЛО ПОСТА (2-3 абзаца):
+- Первый абзац: суть новости, самые важные детали
+- Второй абзац: последствия, цифры, факты
+- Третий абзац (опционально): контекст или вывод
+В конце: хештеги
+
+СТИЛЬ:
+- Используй **жирный** для ключевых моментов и цифр
+- Пиши короткими предложениями
+- Будь провокационным, но фактологичным
+- Добавляй эмодзи для выразительности
+- Используй разговорный язык, но без сленга
+- Длина: 150-250 слов
+
+ИНФОРМАЦИЯ ДЛЯ ПОСТА:
 ТЕМА: %s
+ЗАГОЛОВОК ИСТОЧНИКА: %s
+ОПИСАНИЕ: %s
 
-ИНФОРМАЦИЯ О НОВОСТИ:
-Заголовок: %s
-Описание: %s
-Источник: %s
+ПРИМЕРЫ ХОРОШИХ ПОСТОВ:
 
-ТРЕБОВАНИЯ К ПОСТУ:
-1. Напиши привлекательный заголовок
-2. Основной текст должен быть интересным и информативным
-3. Используй эмодзи для выразительности
-4. В конце укажи источник новости
-5. Сделай текст естественным и читабельным
+⚡️ Кризис ОЗУ привёл к тотальной дурке — Samsung не может купить чипы памяти у самой себя!
 
-ПОСТ ДОЛЖЕН БЫТЬ ГОТОВ К ПУБЛИКАЦИИ В TELEGRAM.
+Подразделение Samsung Galaxy не смогло заключить долгосрочный контракт с командой, поставляющей чипы HBM и LPDDR. Не помогло даже высшее руководство — настолько быстро растут цены. 
 
-Верни ТОЛЬКО готовый пост без дополнительных комментариев.
+В начале года чип LPDDR5X 12 ГБ стоил $33, а теперь стоит целых $70 — и цена будет только расти. 
+
+Ценник на Galaxy S26 на фоне кризиса может внезапно взлететь до небес — как и стоимость многих других смартфонов.
+
+Спасибо ИИ-пузырю
+
+⚡️ Ozon будет ПРИНУДИТЕЛЬНО списывать чаевые — инфу нашли в руководстве маркетплейса. Если вы хотя бы ОДИН РАЗ оставите чаевые, их будут списывать КАЖДЫЙ раз при посещении ПВЗ.
+
+Отказаться от чаевых можно в течение 15 минут. Если бабки списали — ВСЁ, вернуть их не получится.
+
+Следим за кошельками.
+
+ТВОЯ ЗАДАЧА:
+Создать пост в таком же стиле на основе предоставленной информации.
+
+ПРАВИЛА:
+1. Начни с эмодзи ⚡️ и короткого провокационного заголовка
+2. 2-3 абзаца текста, выдели **жирным** ключевые моменты
+3. В конце добавь хештеги как в примерах
+4. Не добавляй "Источник:" или подобные фразы в текст поста
+
+ВЕРНИ ТОЛЬКО ГОТОВЫЙ ПОСТ, БЕЗ ДОПОЛНИТЕЛЬНЫХ КОММЕНТАРИЕВ.
 `,
 		strings.TrimSpace(keywords),
 		strings.TrimSpace(article.Title),
 		strings.TrimSpace(article.Summary),
-		strings.TrimSpace(article.Source),
 	)
 
 	request := ChatCompletionRequest{
@@ -116,7 +147,7 @@ func (c *YandexGPTClient) GeneratePost(ctx context.Context, keywords string, art
 			},
 		},
 		Temperature: 0.7,
-		MaxTokens:   2000,
+		MaxTokens:   1000,
 	}
 
 	jsonData, err := json.Marshal(request)
@@ -167,7 +198,133 @@ func (c *YandexGPTClient) GeneratePost(ctx context.Context, keywords string, art
 	}
 
 	post := strings.TrimSpace(chatResponse.Choices[0].Message.Content)
-	log.Printf("[AI] Успешная генерация поста (длина: %d символов)", len(post))
 
-	return post, nil
+	// Добавляем ссылку на источник в конце
+	postWithSource := fmt.Sprintf("%s\n\nНовость взята с %s", post, article.Source)
+
+	log.Printf("[AI] Успешная генерация поста (длина: %d символов)", len(postWithSource))
+
+	return postWithSource, nil
+}
+
+// ClassifyQuery определяет категорию и подкатегорию запроса
+func (c *YandexGPTClient) ClassifyQuery(ctx context.Context, query string) (category, subcategory string, err error) {
+	prompt := fmt.Sprintf(`
+Определи категорию и подкатегорию для запроса: "%s"
+
+Верни ответ ТОЛЬКО в формате JSON:
+{
+  "category": "название_категории",
+  "subcategory": "название_подкатегории"
+}
+
+Доступные категории и подкатегории:
+1. IT и Технологии:
+   - Искусственный интеллект
+   - Кибербезопасность
+   - Программирование
+   - Гаджеты
+   - Игры
+   - Криптовалюты
+
+2. Бизнес и Финансы:
+   - Стартапы
+   - Инвестиции
+   - Маркетинг
+   - Недвижимость
+   - Карьера
+
+3. Спорт:
+   - Футбол
+   - Хоккей
+   - Баскетбол
+   - Теннис
+   - Бокс/MMA
+   - Автоспорт
+
+4. Путешествия и Туризм:
+   - Авиация
+   - Отели
+   - Города/Страны
+   - Лайфхаки
+   - Виза/Документы
+
+5. Наука и Образование:
+   - Открытия
+   - Медицина
+   - Космос
+   - Образование
+   - История
+
+6. Развлечения и Культура:
+   - Кино
+   - Музыка
+   - Искусство
+   - Знаменитости
+   - Мемы
+
+7. Общество и Политика:
+   - Внутренняя политика
+   - Международные отношения
+   - Социальные вопросы
+   - Законы
+
+8. Здоровье и Спорт:
+   - Фитнес
+   - Диеты
+   - Медицина
+   - Психология
+`, query)
+
+	request := ChatCompletionRequest{
+		Model: c.modelURI,
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+		Temperature: 0.3,
+		MaxTokens:   500,
+	}
+
+	jsonData, err := json.Marshal(request)
+	if err != nil {
+		return "", "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Api-Key %s", c.apiKey))
+	req.Header.Set("OpenAI-Project", c.folderID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Category    string `json:"category"`
+		Subcategory string `json:"subcategory"`
+	}
+
+	// Ищем JSON в ответе
+	var chatResponse ChatCompletionResponse
+	if err := json.Unmarshal(body, &chatResponse); err == nil && len(chatResponse.Choices) > 0 {
+		content := chatResponse.Choices[0].Message.Content
+		// Парсим JSON из текста
+		if err := json.Unmarshal([]byte(content), &result); err == nil {
+			return result.Category, result.Subcategory, nil
+		}
+	}
+
+	// Если не удалось, возвращаем общие категории
+	return "Общее", "Новости", nil
 }

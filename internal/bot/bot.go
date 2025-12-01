@@ -140,27 +140,35 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n⏳ Шаг 1/4: Проверяю доступные генерации...", keywords))
 	log.Printf("[GENERATE] Отправлено первое сообщение, ID: %d", step1Msg.MessageID)
 
-	// Шаг 2: Поиск новостей
-	if step1Msg.MessageID > 0 {
-		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n⏳ Шаг 2/4: Ищу новости по теме...", keywords))
-	} else {
-		// Если первое сообщение не отправилось, отправляем новое
-		step1Msg = b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n⏳ Шаг 2/4: Ищу новости по теме...", keywords))
+	// Шаг 2: Определение категории
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n⏳ Шаг 2/4: Определяю категорию...", keywords))
+
+	log.Printf("[GENERATE] Шаг 2/4: Определение категории...")
+
+	// Определяем категорию и подкатегорию
+	category, subcategory, err := b.gptClient.ClassifyQuery(ctx, keywords)
+	if err != nil {
+		log.Printf("[GENERATE] ❌ Ошибка определения категории: %v", err)
+		category = "Общее"
+		subcategory = "Новости"
 	}
 
-	log.Printf("[GENERATE] Шаг 2/4: Поиск новостей...")
+	log.Printf("[GENERATE] Категория определена: %s/%s", category, subcategory)
 
-	// Получаем релевантные новости
-	articles, err := b.newsAggregator.FindRelevantArticles(keywords, 3)
+	// Шаг 3: Поиск новостей
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n⏳ Шаг 3/4: Ищу новости по теме...",
+			keywords, category, subcategory))
+
+	log.Printf("[GENERATE] Шаг 3/4: Поиск новостей в категории %s/%s...", category, subcategory)
+
+	// Получаем релевантные новости с учетом категории
+	articles, err := b.newsAggregator.FindRelevantArticles(keywords, category, subcategory, 5)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка при поиске новостей: %v", err)
-		if step1Msg.MessageID > 0 {
-			b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-				fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей", keywords))
-		} else {
-			b.sendMessage(userID, fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей", keywords))
-		}
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей", keywords))
 		// Возвращаем генерацию
 		b.db.AddGenerations(userID, 1)
 		return
