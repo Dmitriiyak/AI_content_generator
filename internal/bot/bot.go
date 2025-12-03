@@ -3,7 +3,10 @@ package bot
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +86,7 @@ func (b *Bot) Start(ctx context.Context) {
 		b.sendMessage(update.Message.Chat.ID,
 			"❌ Для генерации поста используйте команду /generate\n"+
 				"Пример: /generate искусственный интеллект\n"+
+				"Или отправьте ссылку на статью: /generate https://example.com/news\n"+
 				"Подробнее: /help")
 	}
 }
@@ -117,10 +121,111 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
-func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keywords string) {
+func (b *Bot) handleStart(msg *tgbotapi.Message) {
+	user := b.db.GetUser(msg.Chat.ID)
+
+	text := fmt.Sprintf(`🤖 AI Content Generator
+
+Я помогу создавать качественные посты для Telegram каналов на основе актуальных новостей или по ссылке на статью.
+
+✨ Основные команды:
+/generate - создать пост по ключевым словам или ссылке
+/balance - проверить баланс генераций  
+/buy - приобрести дополнительные генерации
+/feedback - оставить отзыв о работе бота
+/help - показать справку
+
+🎯 У вас есть %d бесплатных генераций!
+
+🚀 Для генерации поста используйте:
+• /generate ключевые_слова
+• /generate ссылка_на_статью
+
+⚠️ Посты на военную тематику и новости с военной тематикой не обрабатываются.
+
+✨ Примеры:
+/generate искусственный интеллект
+/generate https://habr.com/ru/news/...`, user.AvailableGenerations)
+
+	b.sendMessage(msg.Chat.ID, text)
+}
+
+func (b *Bot) handleHelp(msg *tgbotapi.Message) {
+	text := `📖 Справка по командам
+
+🎯 Основные команды:
+/generate - создать пост по ключевым словам или ссылке
+/balance - проверить баланс
+/buy - купить генерации
+/feedback - оставить отзыв о работе бота
+/help - эта справка
+/payments - управление платежами
+
+📝 Как использовать:
+• Используйте команду /generate ключевые_слова
+• Или отправьте ссылку на статью: /generate https://example.com/news
+
+✨ Примеры:
+  /generate искусственный интеллект
+  /generate https://habr.com/ru/news/...
+
+⚠️ Ограничения:
+• Посты на военную тематику и новости с военной тематикой не обрабатываются.
+• ИИ может отказаться генерировать пост на некоторые темы.
+
+💎 Тарифы:
+• 10 генераций - 99 руб
+• 25 генераций - 199 руб  
+• 100 генераций - 499 руб
+
+⏰ Лимиты:
+• Первые 10 генераций - бесплатно
+• Генерация списывается только при успешном создании поста
+
+💳 Оплата:
+• Безопасная оплата через ЮKassa
+• Мгновенное зачисление
+• Поддержка банковских карт и электронных кошельков`
+
+	b.sendMessage(msg.Chat.ID, text)
+}
+
+func (b *Bot) handleGenerateCommand(msg *tgbotapi.Message) {
+	args := strings.TrimSpace(strings.TrimPrefix(msg.Text, "/generate"))
+	if args == "" {
+		b.sendMessage(msg.Chat.ID,
+			"❌ Не указаны ключевые слова или ссылка\n\n"+
+				"📝 Используйте:\n"+
+				"/generate ключевые слова\n"+
+				"или\n"+
+				"/generate https://example.com/news\n\n"+
+				"✨ Примеры:\n"+
+				"/generate искусственный интеллект\n"+
+				"/generate https://habr.com/ru/news/...")
+		return
+	}
+
+	// Проверяем, является ли аргумент ссылкой
+	if b.isURL(args) {
+		go b.handleGenerateFromURL(context.Background(), msg, args)
+	} else {
+		go b.handleGenerateFromKeywords(context.Background(), msg, args)
+	}
+}
+
+// isURL проверяет, является ли строка URL
+func (b *Bot) isURL(text string) bool {
+	// Простая проверка на URL
+	return strings.HasPrefix(text, "http://") ||
+		strings.HasPrefix(text, "https://") ||
+		strings.Contains(text, "://")
+}
+
+// handleGenerateFromKeywords обрабатывает генерацию по ключевым словам
+func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Message, keywords string) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[PANIC] Восстановление после паники в handleGenerate: %v", r)
+			log.Printf("[PANIC] Восстановление после паники в handleGenerateFromKeywords: %v", r)
 			b.sendMessage(msg.Chat.ID, "❌ Произошла внутренняя ошибка. Попробуйте позже.")
 		}
 	}()
@@ -135,54 +240,21 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 
 	log.Printf("[GENERATE] Начало обработки запроса от %d: %s", userID, keywords)
 
-	// Проверяем доступные генерации (только проверка, без списания)
-	user := b.db.GetUser(userID)
-	log.Printf("[GENERATE] Пользователь %d: доступно %d генераций", userID, user.AvailableGenerations)
-
-	if user.AvailableGenerations <= 0 {
-		text := "❌ Закончились генерации!\n\n" +
-			"💎 Используйте команду /buy чтобы приобрести дополнительные генерации\n\n" +
-			"✨ Доступные пакеты:\n" +
-			"• 10 генераций - 99 руб\n" +
-			"• 25 генераций - 199 руб\n" +
-			"• 100 генераций - 499 руб"
-		b.sendMessage(userID, text)
-		return
-	}
-
 	// Шаг 1: Начало процесса
-	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n⏳ Шаг 1/4: Проверяю доступные генерации...", keywords))
+	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n⏳ Шаг 1/3: Ищу новости по теме...", keywords))
 
-	// Шаг 2: Определение категории
+	// Шаг 2: Поиск новостей
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n⏳ Шаг 2/4: Определяю категорию...", keywords))
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/3: ✓ Готово\n⏳ Шаг 2/3: Анализирую новости...", keywords))
 
-	log.Printf("[GENERATE] Шаг 2/4: Определение категории...")
+	log.Printf("[GENERATE] Шаг 2/3: Поиск новостей...")
 
-	// Определяем категорию и подкатегорию
-	category, subcategory, err := b.gptClient.ClassifyQuery(ctx, keywords)
-	if err != nil {
-		log.Printf("[GENERATE] ❌ Ошибка определения категории: %v", err)
-		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка определения категории\n\n💡 Генерация не списана", keywords))
-		return
-	}
-
-	log.Printf("[GENERATE] Категория определена: %s/%s", category, subcategory)
-
-	// Шаг 3: Поиск новостей
-	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n⏳ Шаг 3/4: Ищу новости по теме...",
-			keywords, category, subcategory))
-
-	log.Printf("[GENERATE] Шаг 3/4: Поиск новостей в категории %s/%s...", category, subcategory)
-
-	// Получаем релевантные новости с учетом категории
-	articles, err := b.newsAggregator.FindRelevantArticles(keywords, category, subcategory, 5)
+	// Получаем релевантные новости
+	articles, err := b.newsAggregator.FindRelevantArticles(keywords, 5)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка при поиске новостей: %v", err)
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей\n\n💡 Генерация не списана", keywords))
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при поиске новостей", keywords))
 		return
 	}
 
@@ -191,52 +263,51 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	if len(articles) == 0 {
 		log.Printf("[GENERATE] ❌ Не найдено новостей по запросу: %s", keywords)
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Новости не найдены\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не найдено подходящих новостей по теме\n\n💡 Генерация не списана", keywords))
+			fmt.Sprintf("❌ Новости не найдены\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не найдено подходящих новостей по теме", keywords))
 		return
 	}
 
-	// Шаг 4: Новости найдены
+	// Шаг 3: Генерация через AI
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n⏳ Шаг 4/4: Выбираю лучшую статью...",
-			keywords, category, subcategory, len(articles)))
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/3: ✓ Готово\n✅ Шаг 2/3: ✓ Найдено %d новостей\n⏳ Шаг 3/3: Генерация поста через AI...",
+			keywords, len(articles)))
 
-	log.Printf("[GENERATE] Шаг 4/4: Выбрана статья: %s", articles[0].Title)
+	log.Printf("[GENERATE] Шаг 3/3: Выбрана статья: %s", articles[0].Title)
 
 	// Генерируем пост через GPT
 	article := articles[0]
 	articleInfo := ai.ArticleInfo{
-		Title:       article.Title,
-		Summary:     article.Summary,
-		URL:         article.URL,
-		Source:      article.Source,
-		Category:    article.Category,
-		Subcategory: article.Subcategory,
+		Title:   article.Title,
+		Summary: article.Summary,
+		URL:     article.URL,
+		Source:  article.Source,
 	}
-
-	// Шаг 5: Генерация через AI
-	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n✅ Шаг 4/4: ✓ Статья выбрана\n⏳ Генерация поста через AI...",
-			keywords, category, subcategory, len(articles)))
 
 	log.Printf("[GENERATE] Генерация поста через AI...")
 	post, err := b.gptClient.GeneratePost(ctx, keywords, articleInfo)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка генерации поста для темы: %s, ошибка: %v", keywords, err)
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста\n\n💡 Генерация не списана", keywords))
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста", keywords))
+		return
+	}
+
+	// Проверяем, не отказался ли GPT
+	if b.isGPTRefusal(post) {
+		log.Printf("[GENERATE] ❌ GPT отказался генерировать пост для темы: %s", keywords)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ ИИ отказался делать пост на данную тему\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: ИИ отказался обсуждать данную тему\n\n💡 Попробуйте другую тему или выберите другую новость", keywords))
 		return
 	}
 
 	if strings.TrimSpace(post) == "" {
 		log.Printf("[GENERATE] ❌ Получен пустой пост")
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост\n\n💡 Генерация не списана", keywords))
+			fmt.Sprintf("❌ Ошибка генерации\n\n🎯 Тема: %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост", keywords))
 		return
 	}
 
 	log.Printf("[GENERATE] Пост сгенерирован, длина: %d символов", len(post))
-
-	b.db.AddGeneration(userID, keywords)
 
 	// ТОЛЬКО ЗДЕСЬ списываем генерацию, когда все этапы успешно пройдены
 	success, err := b.db.UseGeneration(userID)
@@ -247,20 +318,18 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 		return
 	}
 
+	b.db.AddGeneration(userID, keywords)
+
 	// Увеличиваем счетчик генераций для напоминания об отзыве
 	b.db.IncrementGenerationsCount(userID)
 
 	// Все шаги завершены успешно
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
-		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/4: ✓ Готово\n✅ Шаг 2/4: ✓ Категория: %s/%s\n✅ Шаг 3/4: ✓ Найдено %d новостей\n✅ Шаг 4/4: ✓ Статья выбрана\n✅ Генерация завершена\n\n✨ Все этапы завершены! Отправляю результат...",
-			keywords, category, subcategory, len(articles)))
-
-	// Логируем успех
-	log.Printf("[GENERATE] ✅ Успешная генерация поста для темы: %s, источник: %s, ссылка: %s",
-		keywords, article.Source, article.URL)
+		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/3: ✓ Готово\n✅ Шаг 2/3: ✓ Найдено %d новостей\n✅ Шаг 3/3: ✓ Генерация завершена\n\n✨ Все этапы завершены! Отправляю результат...",
+			keywords, len(articles)))
 
 	// Отправляем результат
-	user = b.db.GetUser(userID)
+	user := b.db.GetUser(userID)
 
 	// 1. Отправляем сгенерированный пост с Markdown разметкой
 	b.sendMessageWithMarkdown(userID, post)
@@ -291,93 +360,245 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	log.Printf("[GENERATE] ✅ Завершена обработка запроса от %d", userID)
 }
 
-// Функция для отправки сообщений с Markdown
-func (b *Bot) sendMessageWithMarkdown(chatID int64, text string) tgbotapi.Message {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
-	msg.DisableWebPagePreview = true
+// handleGenerateFromURL обрабатывает генерацию по ссылке
+func (b *Bot) handleGenerateFromURL(ctx context.Context, msg *tgbotapi.Message, url string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC] Восстановление после паники в handleGenerateFromURL: %v", r)
+			b.sendMessage(msg.Chat.ID, "❌ Произошла внутренняя ошибка. Попробуйте позже.")
+		}
+	}()
 
-	message, err := b.api.Send(msg)
-	if err != nil {
-		log.Printf("[ERROR] Ошибка отправки сообщения с Markdown: %v", err)
-		// Пробуем отправить без Markdown
-		return b.sendMessage(chatID, text)
-	}
-	log.Printf("[MESSAGE] Отправлено сообщение с Markdown в чат %d, ID: %d", chatID, message.MessageID)
-	return message
-}
+	userID := msg.Chat.ID
 
-func (b *Bot) handleStart(msg *tgbotapi.Message) {
-	user := b.db.GetUser(msg.Chat.ID)
+	log.Printf("[GENERATE] Начало обработки ссылки от %d: %s", userID, url)
 
-	text := fmt.Sprintf(`🤖 AI Content Generator
+	// Проверяем доступные генерации
+	user := b.db.GetUser(userID)
+	log.Printf("[GENERATE] Пользователь %d: доступно %d генераций", userID, user.AvailableGenerations)
 
-Я помогу создавать качественные посты для Telegram каналов на основе актуальных новостей.
-
-✨ Основные команды:
-/generate - создать пост по ключевым словам
-/balance - проверить баланс генераций  
-/buy - приобрести дополнительные генерации
-/feedback - оставить отзыв о работе бота
-/help - показать справку
-
-🎯 У вас есть %d бесплатных генераций!
-
-🚀 Для генерации поста используйте команду /generate ключевые_слова
-Пример: /generate искусственный интеллект`, user.AvailableGenerations)
-
-	b.sendMessage(msg.Chat.ID, text)
-}
-
-func (b *Bot) handleHelp(msg *tgbotapi.Message) {
-	text := `📖 Справка по командам
-
-🎯 Основные команды:
-/generate - создать пост по ключевым словам
-/balance - проверить баланс
-/buy - купить генерации
-/feedback - оставить отзыв о работе бота
-/help - эта справка
-/payments - управление платежами
-
-📝 Как использовать:
-• Используйте команду /generate ключевые_слова
-• Примеры:
-  /generate искусственный интеллект
-  /generate программирование
-  /generate новые технологии
-
-💎 Тарифы:
-• 10 генераций - 99 руб
-• 25 генераций - 199 руб  
-• 100 генераций - 499 руб
-
-⏰ Лимиты:
-• Первые 10 генераций - бесплатно
-
-💳 Оплата:
-• Безопасная оплата через ЮKassa
-• Мгновенное зачисление
-• Поддержка банковских карт и электронных кошельков`
-
-	b.sendMessage(msg.Chat.ID, text)
-}
-
-func (b *Bot) handleGenerateCommand(msg *tgbotapi.Message) {
-	args := strings.TrimSpace(strings.TrimPrefix(msg.Text, "/generate"))
-	if args == "" {
-		b.sendMessage(msg.Chat.ID,
-			"❌ Не указаны ключевые слова\n\n"+
-				"📝 Используйте:\n"+
-				"/generate ключевые слова\n\n"+
-				"✨ Примеры:\n"+
-				"/generate искусственный интеллект\n"+
-				"/generate новые технологии")
+	if user.AvailableGenerations <= 0 {
+		text := "❌ Закончились генерации!\n\n" +
+			"💎 Используйте команду /buy чтобы приобрести дополнительные генерации\n\n" +
+			"✨ Доступные пакеты:\n" +
+			"• 10 генераций - 99 руб\n" +
+			"• 25 генераций - 199 руб\n" +
+			"• 100 генераций - 499 руб"
+		b.sendMessage(userID, text)
 		return
 	}
 
-	go b.handleGenerate(context.Background(), msg, args)
+	// Шаг 1: Начало процесса
+	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста по ссылке\n\n🔗 %s\n\n⏳ Шаг 1/3: Получаю содержимое страницы...", b.truncateURL(url)))
+
+	// Шаг 2: Получаем содержимое страницы
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста по ссылке\n\n🔗 %s\n\n✅ Шаг 1/3: ✓ Готово\n⏳ Шаг 2/3: Анализирую содержимое...", b.truncateURL(url)))
+
+	title, content, err := b.fetchWebContent(url)
+	if err != nil {
+		log.Printf("[GENERATE] ❌ Ошибка получения содержимого: %v", err)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🔗 %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Не удалось получить содержимое страницы", b.truncateURL(url)))
+		return
+	}
+
+	if title == "" {
+		title = "Новость с сайта"
+	}
+
+	// Обрезаем контент до 3000 символов (чтобы не тратить много токенов)
+	if len(content) > 3000 {
+		content = content[:3000] + "..."
+	}
+
+	// Шаг 3: Генерация через AI
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста по ссылке\n\n🔗 %s\n\n✅ Шаг 1/3: ✓ Готово\n✅ Шаг 2/3: ✓ Содержимое получено\n⏳ Шаг 3/3: Генерация поста через AI...", b.truncateURL(url)))
+
+	log.Printf("[GENERATE] Генерация поста через AI...")
+	post, err := b.gptClient.GeneratePostFromURL(ctx, title, content)
+	if err != nil {
+		log.Printf("[GENERATE] ❌ Ошибка генерации поста для ссылки: %s, ошибка: %v", url, err)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🔗 %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка AI при генерации поста", b.truncateURL(url)))
+		return
+	}
+
+	// Проверяем, не отказался ли GPT
+	if b.isGPTRefusal(post) {
+		log.Printf("[GENERATE] ❌ GPT отказался генерировать пост для ссылки: %s", url)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ ИИ отказался делать пост на данную тему\n\n🔗 %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: ИИ отказался обсуждать данную тему\n\n💡 Попробуйте другую ссылку", b.truncateURL(url)))
+		return
+	}
+
+	if strings.TrimSpace(post) == "" {
+		log.Printf("[GENERATE] ❌ Получен пустой пост")
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка генерации\n\n🔗 %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: AI вернул пустой пост", b.truncateURL(url)))
+		return
+	}
+
+	log.Printf("[GENERATE] Пост сгенерирован, длина: %d символов", len(post))
+
+	// ТОЛЬКО ЗДЕСЬ списываем генерацию, когда все этапы успешно пройдены
+	success, err := b.db.UseGeneration(userID)
+	if err != nil || !success {
+		log.Printf("[GENERATE] ❌ Ошибка списания генерации: %v", err)
+		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+			fmt.Sprintf("❌ Ошибка системы\n\n🔗 %s\n\n⏹️ Процесс остановлен\n\n📛 Причина: Ошибка при списании генерации", b.truncateURL(url)))
+		return
+	}
+
+	b.db.AddGeneration(userID, "ссылка: "+b.truncateURL(url))
+
+	// Увеличиваем счетчик генераций для напоминания об отзыве
+	b.db.IncrementGenerationsCount(userID)
+
+	// Все шаги завершены успешно
+	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
+		fmt.Sprintf("🔄 Генерация поста по ссылке\n\n🔗 %s\n\n✅ Шаг 1/3: ✓ Готово\n✅ Шаг 2/3: ✓ Содержимое получено\n✅ Шаг 3/3: ✓ Генерация завершена\n\n✨ Все этапы завершены! Отправляю результат...", b.truncateURL(url)))
+
+	// Отправляем результат
+	user = b.db.GetUser(userID)
+
+	// 1. Отправляем сгенерированный пост с Markdown разметкой
+	b.sendMessageWithMarkdown(userID, post)
+
+	// 2. Отправляем метаданные отдельным сообщением
+	metadata := fmt.Sprintf(
+		"📋 *Метаданные для поста (добавьте по желанию):*\n\n"+
+			"🔖 *Рекомендуемые хештеги:*\n"+
+			"#новости #интересное\n\n"+
+			"📰 *Источник:* [Ссылка на статью](%s)\n\n"+
+			"✨ *Осталось генераций:* %d",
+		url,
+		user.AvailableGenerations)
+
+	b.sendMessageWithMarkdown(userID, metadata)
+
+	// 3. Отправляем кнопки для оценки качества
+	b.sendRatingRequest(userID, "ссылка")
+
+	log.Printf("[GENERATE] ✅ Завершена обработка ссылки от %d", userID)
 }
+
+// fetchWebContent получает содержимое веб-страницы
+func (b *Bot) fetchWebContent(url string) (title, content string, err error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", "", err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("статус код: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+
+	html := string(body)
+
+	// Извлекаем заголовок
+	titleRegex := regexp.MustCompile(`<title[^>]*>([^<]+)</title>`)
+	if matches := titleRegex.FindStringSubmatch(html); len(matches) > 1 {
+		title = strings.TrimSpace(matches[1])
+	}
+
+	// Извлекаем основной контент (упрощенная версия)
+	// Убираем теги и оставляем текст
+	content = b.extractTextFromHTML(html)
+
+	// Ограничиваем длину текста
+	content = b.truncateText(content, 5000)
+
+	return title, content, nil
+}
+
+// extractTextFromHTML извлекает текст из HTML
+func (b *Bot) extractTextFromHTML(html string) string {
+	// Убираем теги скриптов и стилей
+	html = regexp.MustCompile(`<script[^>]*>[\s\S]*?</script>`).ReplaceAllString(html, "")
+	html = regexp.MustCompile(`<style[^>]*>[\s\S]*?</style>`).ReplaceAllString(html, "")
+
+	// Убираем HTML теги
+	html = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(html, " ")
+
+	// Убираем множественные пробелы и переносы строк
+	html = regexp.MustCompile(`\s+`).ReplaceAllString(html, " ")
+
+	// Берем первые 1000 слов
+	words := strings.Fields(html)
+	if len(words) > 1000 {
+		words = words[:1000]
+	}
+
+	return strings.Join(words, " ")
+}
+
+// truncateText обрезает текст до указанной длины
+func (b *Bot) truncateText(text string, maxLength int) string {
+	if len(text) <= maxLength {
+		return text
+	}
+
+	// Обрезаем до последнего полного слова
+	truncated := text[:maxLength]
+	lastSpace := strings.LastIndex(truncated, " ")
+	if lastSpace > 0 {
+		truncated = truncated[:lastSpace]
+	}
+
+	return truncated + "..."
+}
+
+// truncateURL обрезает URL для отображения
+func (b *Bot) truncateURL(url string) string {
+	if len(url) > 50 {
+		return url[:47] + "..."
+	}
+	return url
+}
+
+// isGPTRefusal проверяет, отказался ли GPT генерировать пост
+func (b *Bot) isGPTRefusal(post string) bool {
+	refusalPhrases := []string{
+		"я не могу обсуждать эту тему",
+		"не могу обсуждать",
+		"отказываюсь обсуждать",
+		"это неэтично",
+		"это неприемлемо",
+		"я не буду",
+		"не могу создать",
+		"не могу написать",
+		"извините, но я не могу",
+		"сожалею, но я не могу",
+	}
+
+	postLower := strings.ToLower(strings.TrimSpace(post))
+	for _, phrase := range refusalPhrases {
+		if strings.Contains(postLower, phrase) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ... остальные методы bot.go остаются без изменений ...
 
 func (b *Bot) handleBuy(msg *tgbotapi.Message) {
 	// Проверяем, доступна ли платежная система
@@ -396,7 +617,7 @@ func (b *Bot) handleBuy(msg *tgbotapi.Message) {
 		"🔹 25 генераций - %d руб.\n"+
 		"🔹 100 генераций - %d руб.\n\n"+
 		"💳 Оплата через ЮKassa\n"+
-		"✨ Генерации будут добавлены мгновенно после оплаты!",
+		"✨ Генерация списывается только при успешном создании поста!",
 		pricing["10"], pricing["25"], pricing["100"])
 
 	b.sendMessageWithKeyboard(msg.Chat.ID, text, b.createBuyMenu())
@@ -409,11 +630,66 @@ func (b *Bot) handleBalance(msg *tgbotapi.Message) {
 		"🎯 Ваш баланс\n\n"+
 			"✨ Доступно генераций: %d\n"+
 			"📊 Всего использовано: %d\n\n"+
-			"💡 Используйте /buy для покупки дополнительных генераций",
+			"💡 Генерация списывается только при успешном создании поста\n"+
+			"💰 Используйте /buy для покупки дополнительных генераций",
 		user.AvailableGenerations,
 		user.TotalGenerations)
 
 	b.sendMessage(msg.Chat.ID, text)
+}
+
+func (b *Bot) generateHashtags(article news.Article) string {
+	// Базовые хештеги
+	hashtags := []string{"новости", "интересное"}
+
+	// Добавляем теги из статьи
+	if len(article.Tags) > 0 {
+		for _, tag := range article.Tags {
+			if tag != "" {
+				cleanTag := strings.ToLower(strings.ReplaceAll(tag, " ", ""))
+				if !contains(hashtags, cleanTag) {
+					hashtags = append(hashtags, cleanTag)
+				}
+			}
+		}
+	}
+
+	// Форматируем хештеги
+	var result strings.Builder
+	for i, tag := range hashtags {
+		if i > 0 {
+			result.WriteString(" ")
+		}
+		result.WriteString("#")
+		result.WriteString(tag)
+	}
+
+	return result.String()
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// Функция для отправки сообщений с Markdown
+func (b *Bot) sendMessageWithMarkdown(chatID int64, text string) tgbotapi.Message {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	msg.DisableWebPagePreview = true
+
+	message, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки сообщения с Markdown: %v", err)
+		// Пробуем отправить без Markdown
+		return b.sendMessage(chatID, text)
+	}
+	log.Printf("[MESSAGE] Отправлено сообщение с Markdown в чат %d, ID: %d", chatID, message.MessageID)
+	return message
 }
 
 func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
@@ -1024,42 +1300,4 @@ func safeInt(value interface{}) int {
 	default:
 		return 0
 	}
-}
-
-func (b *Bot) generateHashtags(article news.Article) string {
-	// Базовые хештеги на основе категории
-	baseHashtags := map[string][]string{
-		"IT и Технологии":        {"технологии", "инновации", "гаджеты", "AI"},
-		"Бизнес и Финансы":       {"бизнес", "финансы", "экономика", "стартапы"},
-		"Спорт":                  {"спорт", "новости", "соревнования"},
-		"Путешествия и Туризм":   {"путешествия", "туризм", "отдых"},
-		"Наука и Образование":    {"наука", "образование", "исследования"},
-		"Развлечения и Культура": {"культура", "искусство", "развлечения"},
-		"Общество и Политика":    {"общество", "политика", "новости"},
-		"Здоровье и Спорт":       {"здоровье", "медицина", "фитнес"},
-	}
-
-	// Получаем хештеги для категории
-	hashtags, exists := baseHashtags[article.Category]
-	if !exists {
-		hashtags = []string{"новости", "интересное"}
-	}
-
-	// Добавляем подкатегорию как хештег
-	if article.Subcategory != "" {
-		subcatHashtag := strings.ToLower(strings.ReplaceAll(article.Subcategory, " ", ""))
-		hashtags = append([]string{subcatHashtag}, hashtags...)
-	}
-
-	// Форматируем хештеги
-	var result strings.Builder
-	for i, tag := range hashtags {
-		if i > 0 {
-			result.WriteString(" ")
-		}
-		result.WriteString("#")
-		result.WriteString(tag)
-	}
-
-	return result.String()
 }

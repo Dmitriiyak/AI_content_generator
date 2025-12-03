@@ -7,6 +7,34 @@ import (
 	"time"
 )
 
+// Синонимы для расширения поиска
+var synonyms = map[string][]string{
+	// Технологии
+	"ии":       {"искусственный интеллект", "нейросеть", "машинное обучение", "AI", "artificial intelligence"},
+	"айти":     {"IT", "информационные технологии", "программирование", "разработка"},
+	"гаджет":   {"устройство", "девайс", "техника", "электроника"},
+	"смартфон": {"телефон", "мобильный", "андроид", "айфон"},
+	"ноутбук":  {"лэптоп", "компьютер", "ПК"},
+
+	// Бизнес
+	"стартап":      {"компания", "бизнес", "предприятие", "проект"},
+	"криптовалюта": {"биткоин", "эфириум", "блокчейн", "крипта"},
+	"инвестиция":   {"вложение", "финансирование", "капитал"},
+
+	// Наука
+	"космос":       {"космонавтика", "астрономия", "вселенная", "галактика"},
+	"исследование": {"эксперимент", "изучение", "научная работа"},
+
+	// Спорт
+	"футбол": {"футбольный", "соккер", "чемпионат"},
+	"хоккей": {"хоккейный", "КХЛ", "НХЛ"},
+	"теннис": {"большой шлем", "Уимблдон"},
+
+	// Автомобили
+	"электромобиль": {"электроавто", "тесла", "EV", "electric vehicle"},
+	"авто":          {"автомобиль", "машина", "транспорт"},
+}
+
 // NewsAggregator управляет сбором и фильтрацией новостей
 type NewsAggregator struct {
 	sources []NewsSource
@@ -28,25 +56,22 @@ func (na *NewsAggregator) AddDefaultSources() {
 	log.Printf("[NEWS] Добавлено %d источников новостей", len(defaultSources))
 }
 
-// FindRelevantArticles находит релевантные статьи по ключевым словам и категориям
-func (na *NewsAggregator) FindRelevantArticles(keywords, category, subcategory string, maxArticles int) ([]Article, error) {
-	log.Printf("[NEWS] Поиск новостей по теме: %s (Категория: %s/%s)", keywords, category, subcategory)
+// FindRelevantArticles находит релевантные статьи по ключевым словам
+func (na *NewsAggregator) FindRelevantArticles(keywords string, maxArticles int) ([]Article, error) {
+	log.Printf("[NEWS] Поиск новостей по теме: %s", keywords)
 
-	// Получаем все статьи из релевантных источников
-	allArticles, err := na.FetchArticlesByCategory(category, subcategory)
+	// Получаем все статьи из всех источников
+	allArticles, err := na.FetchAllArticles()
 	if err != nil {
 		log.Printf("[NEWS] Ошибка получения статей: %v", err)
 		return nil, err
 	}
 
-	log.Printf("[NEWS] Получено %d статей из категории %s/%s", len(allArticles), category, subcategory)
+	log.Printf("[NEWS] Получено %d статей", len(allArticles))
 
 	if len(allArticles) == 0 {
-		log.Printf("[NEWS] ⚠️ Не получено ни одной статьи из категории, ищем во всех источниках")
-		allArticles, err = na.FetchAllArticles()
-		if err != nil {
-			return nil, err
-		}
+		log.Printf("[NEWS] ⚠️ Не получено ни одной статьи")
+		return []Article{}, nil
 	}
 
 	// Фильтруем военные темы
@@ -58,6 +83,10 @@ func (na *NewsAggregator) FindRelevantArticles(keywords, category, subcategory s
 		return []Article{}, nil
 	}
 
+	// Расширяем ключевые слова синонимами
+	expandedKeywords := na.expandKeywords(keywords)
+	log.Printf("[NEWS] Расширенные ключевые слова: %v", expandedKeywords)
+
 	// Создаем структуру для сортировки
 	type scoredArticle struct {
 		article Article
@@ -65,14 +94,10 @@ func (na *NewsAggregator) FindRelevantArticles(keywords, category, subcategory s
 	}
 
 	var scoredArticles []scoredArticle
-	keywordsLower := strings.ToLower(keywords)
-	keywordList := strings.Fields(keywordsLower)
-
-	log.Printf("[NEWS] Ключевые слова для поиска: %v", keywordList)
 
 	// Оцениваем каждую статью
 	for _, article := range articles {
-		score := na.calculateRelevance(article, keywordList, category, subcategory)
+		score := na.calculateRelevance(article, expandedKeywords)
 		if score > 0 {
 			scoredArticles = append(scoredArticles, scoredArticle{
 				article: article,
@@ -105,33 +130,33 @@ func (na *NewsAggregator) FindRelevantArticles(keywords, category, subcategory s
 	return result, nil
 }
 
-// FetchArticlesByCategory собирает статьи из определенной категории
-func (na *NewsAggregator) FetchArticlesByCategory(category, subcategory string) ([]Article, error) {
-	var allArticles []Article
+// expandKeywords расширяет ключевые слова синонимами
+func (na *NewsAggregator) expandKeywords(keywords string) []string {
+	keywords = strings.ToLower(strings.TrimSpace(keywords))
+	words := strings.Fields(keywords)
 
-	for _, source := range na.sources {
-		// Проверяем, подходит ли источник под категорию
-		if rssSource, ok := source.(*RSSSource); ok {
-			if category != "" && rssSource.Category != category {
-				continue
-			}
-			if subcategory != "" && rssSource.Subcategory != subcategory {
-				continue
-			}
+	expanded := make([]string, 0, len(words)*2)
+	seen := make(map[string]bool)
+
+	for _, word := range words {
+		// Добавляем оригинальное слово
+		if !seen[word] {
+			expanded = append(expanded, word)
+			seen[word] = true
 		}
 
-		log.Printf("[NEWS] Получение статей из %s", source.GetName())
-		articles, err := source.FetchArticles()
-		if err != nil {
-			log.Printf("[NEWS] ❌ Ошибка получения статей из %s: %v", source.GetName(), err)
-			continue
+		// Добавляем синонимы
+		if syns, ok := synonyms[word]; ok {
+			for _, syn := range syns {
+				if !seen[syn] {
+					expanded = append(expanded, syn)
+					seen[syn] = true
+				}
+			}
 		}
-		log.Printf("[NEWS] Получено %d статей из %s", len(articles), source.GetName())
-		allArticles = append(allArticles, articles...)
 	}
 
-	log.Printf("[NEWS] Итого собрано %d статей из категории %s/%s", len(allArticles), category, subcategory)
-	return allArticles, nil
+	return expanded
 }
 
 // FetchAllArticles собирает статьи со всех источников
@@ -154,11 +179,11 @@ func (na *NewsAggregator) FetchAllArticles() ([]Article, error) {
 }
 
 // calculateRelevance вычисляет релевантность статьи (0-100)
-func (na *NewsAggregator) calculateRelevance(article Article, keywords []string, targetCategory, targetSubcategory string) float64 {
+func (na *NewsAggregator) calculateRelevance(article Article, keywords []string) float64 {
 	score := 0.0
 	text := strings.ToLower(article.Title + " " + article.Summary)
 
-	// 1. Совпадение ключевых слов (40%)
+	// 1. Совпадение ключевых слов (60%)
 	keywordScore := 0.0
 	for _, keyword := range keywords {
 		if strings.Contains(text, keyword) {
@@ -166,35 +191,27 @@ func (na *NewsAggregator) calculateRelevance(article Article, keywords []string,
 		}
 	}
 	if len(keywords) > 0 {
-		keywordScore = (keywordScore / float64(len(keywords))) * 40.0
+		keywordScore = (keywordScore / float64(len(keywords))) * 60.0
 	}
 	score += keywordScore
 
-	// 2. Совпадение категорий (30%)
-	categoryScore := 0.0
-	if targetCategory != "" && article.Category == targetCategory {
-		categoryScore += 15.0
-	}
-	if targetSubcategory != "" && article.Subcategory == targetSubcategory {
-		categoryScore += 15.0
-	}
-	score += categoryScore
-
-	// 3. Свежесть (20%)
+	// 2. Свежесть (30%)
 	if !article.PublishedAt.IsZero() {
 		hoursSincePublished := time.Since(article.PublishedAt).Hours()
 		if hoursSincePublished < 6 {
-			score += 20.0
+			score += 30.0
 		} else if hoursSincePublished < 12 {
-			score += 15.0
+			score += 25.0
 		} else if hoursSincePublished < 24 {
-			score += 10.0
+			score += 20.0
 		} else if hoursSincePublished < 48 {
-			score += 5.0
+			score += 15.0
+		} else if hoursSincePublished < 72 {
+			score += 10.0
 		}
 	}
 
-	// 4. Качество статьи (10%)
+	// 3. Качество статьи (10%)
 	qualityScore := na.calculateArticleQuality(article)
 	score += qualityScore
 
@@ -251,24 +268,6 @@ func (na *NewsAggregator) FilterOutMilitaryTopics(articles []Article) []Article 
 		"сражение", "битва", "убит", "убийств", "убийство", "смерть", "погибш",
 		"стрельб", "перестрелк", "террорист", "теракт", "диверсант", "диверсия",
 		"противостояние", "противоречие", "столкновение", "эскалация", "насилие",
-
-		// Букмекеры и азартные игры
-		"ставк", "букмекер", "тотал", "прогноз", "фора", "коэффициент", "бет",
-		"беттинг", "пари", "слот", "казин", "рулетк", "покер", "блэкджек", "джекпот",
-		"гэмблинг", "игров", "автомат", "онлайн казин", "виртуальн", "лотере",
-		"бонус", "бездепозит", "фриспин", "казино", "bet", "1xbet", "1хбет", "1xstavka",
-		"фанспорт", "лига ставок", "волатильность", "роспись", "лайв", "лайв ставк",
-		"экспресс", "ординар", "систем", "купон", "линия", "тотализатор", "ставкомат",
-		"промокод", "приветственн", "бездепозитн", "фрибет", "демо", "рейтинг букмекер",
-		"обзор казин", "топ казин", "лучшие казин", "слоты", "игровые автомат", "БЕТСИТИ",
-
-		// ЛГБТ тематика (нейтральная фильтрация для широкой аудитории)
-		"лгбт", "гомосексуал", "лесби", "бисексуал", "трансгендер", "квир",
-		"гей", "голуб", "розов", "радуг", "прайд", "парад", "толерант", "толерантность",
-		"дискриминац", "гомофоб", "гомофобия", "сексуальная ориентация", "гендер",
-		"небинарн", "пансексуал", "асексуал", "интерсекс", "союз", "брак",
-		"однопол", "однополый", "содом", "гомосексуализм", "сексуальное меньшинство",
-		"сексуальные меньшинства", "прайд парад", "радужный флаг", "флаг лгбт",
 	}
 
 	for _, article := range articles {
