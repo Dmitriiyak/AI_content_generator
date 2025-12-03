@@ -122,9 +122,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) handleStart(msg *tgbotapi.Message) {
-	user := b.db.GetUser(msg.Chat.ID)
 
-	text := fmt.Sprintf(`🤖 AI Content Generator
+	text := `🤖 AI Content Generator
 
 Я помогу создавать качественные посты для Telegram каналов на основе актуальных новостей или по ссылке на статью.
 
@@ -135,7 +134,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 /feedback - оставить отзыв о работе бота
 /help - показать справку
 
-🎯 У вас есть %d бесплатных генераций!
+🎯 Для всех новых пользователей 10 бесплатных генераций!
 
 🚀 Для генерации поста используйте:
 • /generate ключевые_слова
@@ -145,7 +144,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 
 ✨ Примеры:
 /generate искусственный интеллект
-/generate https://habr.com/ru/news/...`, user.AvailableGenerations)
+/generate https://habr.com/ru/news/...`
 
 	b.sendMessage(msg.Chat.ID, text)
 }
@@ -159,7 +158,6 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message) {
 /buy - купить генерации
 /feedback - оставить отзыв о работе бота
 /help - эта справка
-/payments - управление платежами
 
 📝 Как использовать:
 • Используйте команду /generate ключевые_слова
@@ -167,11 +165,14 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message) {
 
 ✨ Примеры:
   /generate искусственный интеллект
-  /generate https://habr.com/ru/news/...
+  /generate https://example.com/ru/news/...
 
 ⚠️ Ограничения:
 • Посты на военную тематику и новости с военной тематикой не обрабатываются.
 • ИИ может отказаться генерировать пост на некоторые темы.
+• На ваш запрос может не найтись новости в наших источниках, поэтому пост может быть не точным.
+Если вы найдете новость, которую не нашел наш бот, отправьте ссылку на нее и ваш запрос в обратную связь (команда /feedback) и мы вернем вам генерацию!
+Сделаем бота лучше вместе!
 
 💎 Тарифы:
 • 10 генераций - 99 руб
@@ -277,10 +278,11 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 	// Генерируем пост через GPT
 	article := articles[0]
 	articleInfo := ai.ArticleInfo{
-		Title:   article.Title,
-		Summary: article.Summary,
-		URL:     article.URL,
-		Source:  article.Source,
+		Title:    article.Title,
+		Summary:  article.Summary,
+		URL:      article.URL,
+		Source:   article.Source,
+		ImageURL: article.ImageURL,
 	}
 
 	log.Printf("[GENERATE] Генерация поста через AI...")
@@ -330,6 +332,11 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 
 	// Отправляем результат
 	user := b.db.GetUser(userID)
+
+	// 1. Отправляем картинку, если есть
+	if article.ImageURL != "" {
+		b.sendPhotoWithCaption(userID, article.ImageURL, "🖼️ *Изображение из новости*")
+	}
 
 	// 1. Отправляем сгенерированный пост с Markdown разметкой
 	b.sendMessageWithMarkdown(userID, post)
@@ -1299,5 +1306,29 @@ func safeInt(value interface{}) int {
 		return 0
 	default:
 		return 0
+	}
+}
+
+func (b *Bot) sendPhotoWithCaption(chatID int64, photoURL, caption string) {
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
+	photo.Caption = caption
+	photo.ParseMode = "Markdown"
+
+	_, err := b.api.Send(photo)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки фото: %v, URL: %s", err, photoURL)
+		// Пытаемся отправить как документ, если не получилось как фото
+		b.sendDocumentWithCaption(chatID, photoURL, caption)
+	}
+}
+
+func (b *Bot) sendDocumentWithCaption(chatID int64, docURL, caption string) {
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileURL(docURL))
+	doc.Caption = caption
+	doc.ParseMode = "Markdown"
+
+	_, err := b.api.Send(doc)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки документа: %v, URL: %s", err, docURL)
 	}
 }
