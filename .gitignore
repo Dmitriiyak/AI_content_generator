@@ -2,6 +2,7 @@
 users.json
 purchases.json
 generations.json
+pending_purchases.json
 
 # Файлы окружения
 .env
