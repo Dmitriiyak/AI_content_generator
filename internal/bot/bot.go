@@ -141,7 +141,12 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 • /generate ключевые_слова
 • /generate ссылка_на_статью
 
-⚠️ Посты на военную тематику и новости с военной тематикой не обрабатываются.
+⚠️ Ограничения:
+• Посты на военную тематику и новости с военной тематикой не обрабатываются.
+• ИИ может отказаться генерировать пост на некоторые темы.
+• На ваш запрос может не найтись новости в наших источниках, поэтому пост может быть не точным.
+Если вы найдете новость, которую не нашел наш бот, отправьте ссылку на нее и ваш запрос в обратную связь (команда /feedback) и мы вернем вам генерацию!
+Сделаем бота лучше вместе!
 
 ✨ Примеры:
 /generate искусственный интеллект
@@ -753,6 +758,7 @@ func (b *Bot) isGPTRefusal(post string) bool {
 }
 
 func (b *Bot) handleBuy(msg *tgbotapi.Message) {
+	// Проверяем, доступна ли платежная система
 	if b.yooMoney == nil {
 		b.sendMessage(msg.Chat.ID,
 			"❌ Платежная система временно недоступна\n\n"+
@@ -1244,7 +1250,7 @@ func (b *Bot) handlePurchase(chatID int64, packageType string) {
 		return
 	}
 
-	log.Printf("[PAYMENT] Создание платежа для пользователя %d: %s (%d руб, %d генераций)",
+	log.Printf("[PAYMENT] Создание платежа для пользователя %d: пакет %s (%d руб, %d генераций)",
 		chatID, packageType, price, count)
 
 	// Создаем платеж через ЮKassa
@@ -1252,8 +1258,12 @@ func (b *Bot) handlePurchase(chatID int64, packageType string) {
 	if err != nil {
 		log.Printf("[PAYMENT] ❌ Ошибка создания платежа: %v", err)
 
-		errorMsg := fmt.Sprintf("❌ Ошибка при создании платежа:\n\n%s\n\n💡 Проверьте настройки платежной системы", err.Error())
-		b.sendMessage(chatID, errorMsg)
+		// Проверяем, является ли ошибка из-за отсутствия настроек платежной системы
+		if strings.Contains(err.Error(), "не установлены") {
+			b.sendMessage(chatID, "❌ Платежная система не настроена. Обратитесь к администратору.")
+		} else {
+			b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка при создании платежа: %v", err))
+		}
 		return
 	}
 
@@ -1269,7 +1279,7 @@ func (b *Bot) handlePurchase(chatID int64, packageType string) {
 	}
 
 	if err := b.db.AddPendingPurchase(purchase); err != nil {
-		log.Printf("[PAYMENT] ❌ Ошибка сохранения платежа: %v", err)
+		log.Printf("[PAYMENT] ❌ Ошибка сохранения платежа в БД: %v", err)
 		b.sendMessage(chatID, "❌ Ошибка при сохранении платежа в базу данных.")
 		return
 	}
@@ -1320,6 +1330,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 	// Проверяем статус платежа
 	paymentResp, err := b.yooMoney.CheckPayment(paymentID)
 	if err != nil {
+		log.Printf("[PAYMENT] ❌ Ошибка проверки платежа %s: %v", paymentID, err)
 		b.sendMessage(userID, "❌ Ошибка при проверке платежа. Попробуйте позже.")
 		return
 	}
@@ -1340,7 +1351,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 		if pkg, ok := packageType.(string); ok {
 			packageCode = strings.TrimPrefix(pkg, "buy_")
 		} else {
-			packageCode = "10"
+			packageCode = "10" // fallback
 		}
 
 		if cnt, ok := count.(float64); ok {
@@ -1348,7 +1359,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 		} else if cnt, ok := count.(int); ok {
 			generationCount = cnt
 		} else {
-			generationCount = 10
+			generationCount = 10 // fallback
 		}
 
 		// Определяем цену по пакету
@@ -1366,6 +1377,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 
 		// Добавляем покупку в базу
 		if err := b.db.AddPurchase(userID, packageCode, price); err != nil {
+			log.Printf("[PAYMENT] ❌ Ошибка зачисления генераций: %v", err)
 			b.sendMessage(userID, "❌ Ошибка при зачислении генераций. Обратитесь к администратору.")
 			return
 		}
@@ -1393,6 +1405,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 			"❌ Платеж отменен. Если у вас есть вопросы, обратитесь к администратору.")
 
 	default:
+		log.Printf("[PAYMENT] Неизвестный статус платежа %s: %s", paymentID, paymentResp.Status)
 		b.sendMessage(userID, "⚠️ Неизвестный статус платежа: "+paymentResp.Status)
 	}
 }
@@ -1414,27 +1427,30 @@ func (b *Bot) handleCancelPayment(callback *tgbotapi.CallbackQuery) {
 
 // Периодическая проверка статуса платежей
 func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
+	// Ждем 30 секунд перед первой проверкой
 	time.Sleep(30 * time.Second)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 10; i++ { // Проверяем 10 раз с интервалом
 		paymentResp, err := b.yooMoney.CheckPayment(paymentID)
 		if err != nil {
-			log.Printf("[PAYMENT] Ошибка проверки статуса платежа %s: %v", paymentID, err)
+			log.Printf("[PAYMENT] ❌ Ошибка проверки статуса платежа %s: %v", paymentID, err)
 			time.Sleep(30 * time.Second)
 			continue
 		}
 
 		if paymentResp.Status == "succeeded" {
+			// Получаем данные из метаданных
 			packageType := paymentResp.Metadata["package_type"]
 			count := paymentResp.Metadata["count"]
 
 			var packageCode string
 			var generationCount int
 
+			// Извлекаем значения из метаданных
 			if pkg, ok := packageType.(string); ok {
 				packageCode = strings.TrimPrefix(pkg, "buy_")
 			} else {
-				packageCode = "10"
+				packageCode = "10" // fallback
 			}
 
 			if cnt, ok := count.(float64); ok {
@@ -1442,9 +1458,10 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 			} else if cnt, ok := count.(int); ok {
 				generationCount = cnt
 			} else {
-				generationCount = 10
+				generationCount = 10 // fallback
 			}
 
+			// Определяем цену по пакету
 			var price int
 			switch packageCode {
 			case "10":
@@ -1457,10 +1474,13 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 				price = 99
 			}
 
+			// Автоматически зачисляем генерации
 			if err := b.db.AddPurchase(chatID, packageCode, price); err == nil {
 				b.sendMessage(chatID,
 					fmt.Sprintf("✅ Платеж прошел успешно! Зачислено %d генераций.", generationCount))
 				b.db.UpdatePurchaseStatus(paymentID, "succeeded")
+			} else {
+				log.Printf("[PAYMENT] ❌ Ошибка автоматического зачисления генераций: %v", err)
 			}
 			return
 		} else if paymentResp.Status == "canceled" {
@@ -1468,9 +1488,11 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 			return
 		}
 
+		// Ждем 30 секунд перед следующей проверкой
 		time.Sleep(30 * time.Second)
 	}
 
+	// Если платеж все еще в ожидании, напоминаем
 	b.sendMessage(chatID,
 		"⏳ Ваш платеж все еще в ожидании. Вы можете проверить статус вручную, нажав кнопку '🔄 Проверить оплату' в сообщении о покупке.")
 }
