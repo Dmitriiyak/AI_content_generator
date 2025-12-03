@@ -23,10 +23,13 @@ type User struct {
 }
 
 type Purchase struct {
+	PaymentID   string    `json:"payment_id"`
 	UserID      int64     `json:"user_id"`
 	PackageType string    `json:"package_type"`
 	Price       int       `json:"price"`
-	Timestamp   time.Time `json:"timestamp"`
+	Status      string    `json:"status"` // pending, succeeded, canceled
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Generation struct {
@@ -36,20 +39,27 @@ type Generation struct {
 }
 
 type Database struct {
-	users       map[int64]*User
-	purchases   []Purchase
-	generations []Generation
-	file        string
-	mu          sync.RWMutex
+	users            map[int64]*User
+	purchases        []Purchase
+	pendingPurchases map[string]*Purchase
+	generations      []Generation
+	file             string
+	mu               sync.RWMutex
 }
 
 func NewDatabase(filename string) *Database {
-	return &Database{
-		users:       make(map[int64]*User),
-		purchases:   make([]Purchase, 0),
-		generations: make([]Generation, 0),
-		file:        filename,
+	db := &Database{
+		users:            make(map[int64]*User),
+		purchases:        make([]Purchase, 0),
+		pendingPurchases: make(map[string]*Purchase),
+		generations:      make([]Generation, 0),
+		file:             filename,
 	}
+
+	// Загружаем ожидающие покупки при создании
+	db.loadPendingPurchases()
+
+	return db
 }
 
 func (db *Database) Load() error {
@@ -82,6 +92,29 @@ func (db *Database) Load() error {
 	generationData, err := os.ReadFile("generations.json")
 	if err == nil && len(generationData) > 0 {
 		json.Unmarshal(generationData, &db.generations)
+	}
+
+	return nil
+}
+
+func (db *Database) loadPendingPurchases() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	data, err := os.ReadFile("pending_purchases.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("ошибка чтения файла ожидающих покупок: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	if err := json.Unmarshal(data, &db.pendingPurchases); err != nil {
+		return fmt.Errorf("ошибка парсинга JSON ожидающих покупок: %w", err)
 	}
 
 	return nil
@@ -130,8 +163,85 @@ func (db *Database) save() error {
 		return fmt.Errorf("ошибка записи файла истории генераций: %w", err)
 	}
 
+	// Сохраняем ожидающие покупки
+	if err := db.savePendingPurchases(); err != nil {
+		return err
+	}
+
 	log.Printf("[DB] ✅ Данные успешно сохранены")
 	return nil
+}
+
+func (db *Database) savePendingPurchases() error {
+	data, err := json.MarshalIndent(db.pendingPurchases, "", "  ")
+	if err != nil {
+		return fmt.Errorf("ошибка маршалинга ожидающих покупок: %w", err)
+	}
+
+	tempFile := "pending_purchases.json.tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return fmt.Errorf("ошибка записи временного файла: %w", err)
+	}
+
+	if err := os.Rename(tempFile, "pending_purchases.json"); err != nil {
+		return fmt.Errorf("ошибка переименования файла: %w", err)
+	}
+
+	return nil
+}
+
+func (db *Database) AddPendingPurchase(purchase *Purchase) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	db.pendingPurchases[purchase.PaymentID] = purchase
+	return db.savePendingPurchases()
+}
+
+func (db *Database) GetPendingPurchase(paymentID string) *Purchase {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	return db.pendingPurchases[paymentID]
+}
+
+func (db *Database) UpdatePurchaseStatus(paymentID, status string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	purchase, exists := db.pendingPurchases[paymentID]
+	if !exists {
+		return fmt.Errorf("покупка не найдена")
+	}
+
+	purchase.Status = status
+	purchase.UpdatedAt = time.Now()
+
+	// Если покупка завершена успешно, перемещаем ее в основную историю
+	if status == "succeeded" {
+		db.purchases = append(db.purchases, *purchase)
+		delete(db.pendingPurchases, paymentID)
+	}
+
+	// Сохраняем оба файла
+	if err := db.save(); err != nil {
+		return err
+	}
+
+	return db.savePendingPurchases()
+}
+
+func (db *Database) GetUserPurchases(userID int64) []*Purchase {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var userPurchases []*Purchase
+	for _, purchase := range db.pendingPurchases {
+		if purchase.UserID == userID {
+			userPurchases = append(userPurchases, purchase)
+		}
+	}
+	return userPurchases
 }
 
 func (db *Database) AddGeneration(userID int64, keywords string) {
@@ -311,10 +421,13 @@ func (db *Database) AddPurchase(userID int64, packageType string, price int) err
 
 	// Добавляем покупку в историю
 	db.purchases = append(db.purchases, Purchase{
+		PaymentID:   fmt.Sprintf("manual_%d_%d", userID, time.Now().Unix()),
 		UserID:      userID,
 		PackageType: packageType,
 		Price:       price,
-		Timestamp:   time.Now(),
+		Status:      "succeeded",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	})
 
 	// Получаем или создаем пользователя
@@ -413,10 +526,11 @@ func (db *Database) GetStatistics(password string) map[string]interface{} {
 	monthAgo := now.Add(-30 * 24 * time.Hour)
 
 	stats := map[string]interface{}{
-		"all_time":    db.calcPeriodStats(time.Time{}, now),
-		"last_month":  db.calcPeriodStats(monthAgo, now),
-		"last_24h":    db.calcPeriodStats(dayAgo, now),
-		"total_users": len(db.users),
+		"all_time":          db.calcPeriodStats(time.Time{}, now),
+		"last_month":        db.calcPeriodStats(monthAgo, now),
+		"last_24h":          db.calcPeriodStats(dayAgo, now),
+		"total_users":       len(db.users),
+		"pending_purchases": len(db.pendingPurchases),
 	}
 
 	return stats
@@ -426,7 +540,7 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 	stats := map[string]interface{}{
 		"users":         0,
 		"new_users":     0,
-		"generations":   0, // Добавлено
+		"generations":   0,
 		"purchases_10":  0,
 		"purchases_25":  0,
 		"purchases_100": 0,
@@ -438,7 +552,7 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 
 	// Подсчет покупок
 	for _, purchase := range db.purchases {
-		if purchase.Timestamp.After(from) && (to.IsZero() || purchase.Timestamp.Before(to)) {
+		if purchase.Status == "succeeded" && purchase.CreatedAt.After(from) && (to.IsZero() || purchase.CreatedAt.Before(to)) {
 			switch purchase.PackageType {
 			case "10":
 				stats["purchases_10"] = stats["purchases_10"].(int) + 1
@@ -484,4 +598,18 @@ func (db *Database) GetTopGenerationTopics(from, to time.Time, limit int) map[st
 	}
 
 	return topics
+}
+
+func (db *Database) CancelAllPendingPurchases(userID int64) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	for paymentID, purchase := range db.pendingPurchases {
+		if purchase.UserID == userID && purchase.Status == "pending" {
+			purchase.Status = "canceled"
+			purchase.UpdatedAt = time.Now()
+			db.pendingPurchases[paymentID] = purchase
+		}
+	}
+	db.savePendingPurchases()
 }

@@ -5,6 +5,7 @@ import (
 	"AIGenerator/internal/bot"
 	"AIGenerator/internal/database"
 	"AIGenerator/internal/news"
+	"AIGenerator/internal/payment"
 	"context"
 	"fmt"
 	"log"
@@ -33,13 +34,13 @@ func main() {
 	fmt.Println("=========================================")
 
 	// 1. Загрузка переменных окружения
-	fmt.Println("[1/6] Загрузка .env файла...")
+	fmt.Println("[1/7] Загрузка .env файла...")
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("⚠️  .env файл не найден, проверяю системные переменные")
 	}
 
 	// 2. Инициализация базы данных
-	fmt.Println("[2/6] Инициализация базы данных...")
+	fmt.Println("[2/7] Инициализация базы данных...")
 	db := database.NewDatabase("users.json")
 	if err := db.Load(); err != nil {
 		fmt.Printf("⚠️  Ошибка загрузки базы: %v\n", err)
@@ -49,7 +50,7 @@ func main() {
 	}
 
 	// 3. Инициализация YandexGPT
-	fmt.Println("[3/6] Инициализация YandexGPT...")
+	fmt.Println("[3/7] Инициализация YandexGPT...")
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	yandexAPIKey := os.Getenv("YANDEX_GPT_API_KEY")
 	yandexFolderID := os.Getenv("YANDEX_FOLDER_ID")
@@ -93,21 +94,32 @@ func main() {
 	fmt.Println("✅ YandexGPT клиент создан")
 
 	// 4. Инициализация новостного агрегатора
-	fmt.Println("[4/6] Инициализация новостного агрегатора...")
+	fmt.Println("[4/7] Инициализация новостного агрегатора...")
 	newsAggregator := news.NewNewsAggregator()
 	newsAggregator.AddDefaultSources()
 	fmt.Println("✅ Новостной агрегатор создан")
 
-	// 5. Создание бота
-	fmt.Println("[5/6] Создание Telegram бота...")
-	telegramBot, err := bot.New(botToken, newsAggregator, gptClient, db, adminChatID)
+	// 5. Инициализация платежной системы
+	fmt.Println("[5/7] Инициализация платежной системы ЮKassa...")
+	yooMoneyClient, err := payment.NewYooMoneyClient()
+	if err != nil {
+		fmt.Printf("⚠️  ЮKassa недоступна: %v\n", err)
+		fmt.Println("💡 Функция покупки будет недоступна")
+		yooMoneyClient = nil
+	} else {
+		fmt.Println("✅ ЮKassa клиент создан")
+	}
+
+	// 6. Создание бота
+	fmt.Println("[6/7] Создание Telegram бота...")
+	telegramBot, err := bot.New(botToken, newsAggregator, gptClient, db, yooMoneyClient, adminChatID)
 	if err != nil {
 		fmt.Printf("❌ ОШИБКА: Не удалось создать бота: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 6. Настройка graceful shutdown
-	fmt.Println("[6/6] Настройка graceful shutdown...")
+	// 7. Настройка graceful shutdown
+	fmt.Println("[7/7] Настройка graceful shutdown...")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

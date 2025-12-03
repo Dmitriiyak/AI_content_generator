@@ -12,6 +12,7 @@ import (
 	"AIGenerator/internal/ai"
 	"AIGenerator/internal/database"
 	"AIGenerator/internal/news"
+	"AIGenerator/internal/payment"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -21,11 +22,12 @@ type Bot struct {
 	newsAggregator *news.NewsAggregator
 	gptClient      *ai.YandexGPTClient
 	db             *database.Database
+	yooMoney       *payment.YooMoneyClient
 	mu             sync.Mutex
 	adminChatID    int64
 }
 
-func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.YandexGPTClient, db *database.Database, adminChatID int64) (*Bot, error) {
+func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.YandexGPTClient, db *database.Database, yooMoney *payment.YooMoneyClient, adminChatID int64) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка создания бота: %w", err)
@@ -37,6 +39,7 @@ func New(token string, newsAggregator *news.NewsAggregator, gptClient *ai.Yandex
 		newsAggregator: newsAggregator,
 		gptClient:      gptClient,
 		db:             db,
+		yooMoney:       yooMoney,
 		adminChatID:    adminChatID,
 	}, nil
 }
@@ -107,6 +110,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleFeedbackCommand(msg)
 	case "cancel":
 		b.handleCancelCommand(msg)
+	case "payments":
+		b.handlePaymentsCommand(msg)
 	default:
 		b.sendMessage(msg.Chat.ID, "❌ Неизвестная команда. Используйте /help для списка команд.")
 	}
@@ -135,7 +140,13 @@ func (b *Bot) handleGenerate(ctx context.Context, msg *tgbotapi.Message, keyword
 	log.Printf("[GENERATE] Пользователь %d: доступно %d генераций", userID, user.AvailableGenerations)
 
 	if user.AvailableGenerations <= 0 {
-		b.sendMessage(userID, "❌ Закончились генерации!\n\n💎 Используйте команду /buy чтобы приобрести дополнительные генерации")
+		text := "❌ Закончились генерации!\n\n" +
+			"💎 Используйте команду /buy чтобы приобрести дополнительные генерации\n\n" +
+			"✨ Доступные пакеты:\n" +
+			"• 10 генераций - 99 руб\n" +
+			"• 25 генераций - 199 руб\n" +
+			"• 100 генераций - 499 руб"
+		b.sendMessage(userID, text)
 		return
 	}
 
@@ -327,6 +338,7 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message) {
 /buy - купить генерации
 /feedback - оставить отзыв о работе бота
 /help - эта справка
+/payments - управление платежами
 
 📝 Как использовать:
 • Используйте команду /generate ключевые_слова
@@ -341,7 +353,12 @@ func (b *Bot) handleHelp(msg *tgbotapi.Message) {
 • 100 генераций - 499 руб
 
 ⏰ Лимиты:
-• Первые 10 генераций - бесплатно`
+• Первые 10 генераций - бесплатно
+
+💳 Оплата:
+• Безопасная оплата через ЮKassa
+• Мгновенное зачисление
+• Поддержка банковских карт и электронных кошельков`
 
 	b.sendMessage(msg.Chat.ID, text)
 }
@@ -363,6 +380,14 @@ func (b *Bot) handleGenerateCommand(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) handleBuy(msg *tgbotapi.Message) {
+	// Проверяем, доступна ли платежная система
+	if b.yooMoney == nil {
+		b.sendMessage(msg.Chat.ID,
+			"❌ Платежная система временно недоступна\n\n"+
+				"💡 Пожалуйста, попробуйте позже или свяжитесь с администратором.")
+		return
+	}
+
 	pricing := b.db.GetPricing()
 
 	text := fmt.Sprintf("💎 Приобретите дополнительные генерации\n\n"+
@@ -370,7 +395,8 @@ func (b *Bot) handleBuy(msg *tgbotapi.Message) {
 		"🔹 10 генераций - %d руб.\n"+
 		"🔹 25 генераций - %d руб.\n"+
 		"🔹 100 генераций - %d руб.\n\n"+
-		"💡 Генерации будут добавлены мгновенно!",
+		"💳 Оплата через ЮKassa\n"+
+		"✨ Генерации будут добавлены мгновенно после оплаты!",
 		pricing["10"], pricing["25"], pricing["100"])
 
 	b.sendMessageWithKeyboard(msg.Chat.ID, text, b.createBuyMenu())
@@ -458,6 +484,28 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	b.sendMessage(msg.Chat.ID, text)
 }
 
+func (b *Bot) handlePaymentsCommand(msg *tgbotapi.Message) {
+	userID := msg.Chat.ID
+
+	if b.yooMoney == nil {
+		b.sendMessage(userID, "❌ Платежная система временно недоступна.")
+		return
+	}
+
+	text := `💳 Управление платежами
+
+Здесь вы можете:
+• Проверить статус своих платежей
+• Получить помощь по оплате
+• Отменить ожидающие платежи
+
+Для покупки генераций используйте команду /buy
+
+📞 Если у вас возникли проблемы с оплатой, свяжитесь с администратором.`
+
+	b.sendMessage(userID, text)
+}
+
 func (b *Bot) handleFeedbackCommand(msg *tgbotapi.Message) {
 	userID := msg.Chat.ID
 
@@ -534,10 +582,16 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	// Отвечаем на callback
 	_, _ = b.api.Request(tgbotapi.NewCallback(callback.ID, ""))
 
-	if strings.HasPrefix(callback.Data, "buy_") {
-		b.handlePurchase(callback.Message.Chat.ID, callback.Data)
-	} else if strings.HasPrefix(callback.Data, "rate_") {
+	data := callback.Data
+
+	if strings.HasPrefix(data, "buy_") {
+		b.handlePurchase(callback.Message.Chat.ID, data)
+	} else if strings.HasPrefix(data, "rate_") {
 		b.handleRating(callback)
+	} else if strings.HasPrefix(data, "check_") {
+		b.handleCheckPayment(callback)
+	} else if strings.HasPrefix(data, "cancel_") {
+		b.handleCancelPayment(callback)
 	}
 }
 
@@ -594,40 +648,269 @@ func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
 }
 
 func (b *Bot) handlePurchase(chatID int64, packageType string) {
+	if b.yooMoney == nil {
+		b.sendMessage(chatID, "❌ Платежная система временно недоступна. Попробуйте позже.")
+		return
+	}
+
 	var price, count int
+	var description string
 
 	switch packageType {
 	case "buy_10":
 		price = 99
 		count = 10
+		description = "Покупка 10 генераций в AI Content Generator"
 	case "buy_25":
 		price = 199
 		count = 25
+		description = "Покупка 25 генераций в AI Content Generator"
 	case "buy_100":
 		price = 499
 		count = 100
+		description = "Покупка 100 генераций в AI Content Generator"
 	default:
 		b.sendMessage(chatID, "❌ Неизвестный тип пакета")
 		return
 	}
 
-	// Добавляем покупку
-	packageCode := strings.TrimPrefix(packageType, "buy_")
-	if err := b.db.AddPurchase(chatID, packageCode, price); err != nil {
-		b.sendMessage(chatID, "❌ Ошибка при обработке покупки")
+	log.Printf("[PAYMENT] Создание платежа для пользователя %d: %s (%d руб, %d генераций)",
+		chatID, packageType, price, count)
+
+	// Создаем платеж через ЮKassa
+	paymentResp, err := b.yooMoney.CreatePayment(float64(price), description, chatID, packageType, count)
+	if err != nil {
+		log.Printf("[PAYMENT] ❌ Ошибка создания платежа: %v", err)
+
+		// Более подробное сообщение об ошибке
+		errorMsg := fmt.Sprintf("❌ Ошибка при создании платежа:\n\n%s\n\n💡 Проверьте настройки платежной системы", err.Error())
+		b.sendMessage(chatID, errorMsg)
 		return
 	}
 
-	user := b.db.GetUser(chatID)
-	text := fmt.Sprintf(
-		"✅ Покупка успешна!\n\n"+
-			"✨ Добавлено генераций: %d\n"+
-			"💰 Стоимость: %d руб.\n"+
-			"🎯 Теперь доступно: %d\n\n"+
-			"Теперь вы можете использовать /generate для создания постов!",
-		count, price, user.AvailableGenerations)
+	// Сохраняем информацию о платеже
+	purchase := &database.Purchase{
+		PaymentID:   paymentResp.ID,
+		UserID:      chatID,
+		PackageType: packageType,
+		Price:       price,
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
 
-	b.sendMessage(chatID, text)
+	if err := b.db.AddPendingPurchase(purchase); err != nil {
+		log.Printf("[PAYMENT] ❌ Ошибка сохранения платежа: %v", err)
+		b.sendMessage(chatID, "❌ Ошибка при сохранении платежа в базу данных.")
+		return
+	}
+
+	// Отправляем пользователю ссылку для оплаты
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", paymentResp.Confirmation.ConfirmationURL),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Проверить оплату", fmt.Sprintf("check_%s", paymentResp.ID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("❌ Отменить", fmt.Sprintf("cancel_%s", paymentResp.ID)),
+		),
+	)
+
+	msg := fmt.Sprintf(
+		"💎 *Покупка %d генераций*\n\n"+
+			"💰 Сумма: *%d руб.*\n"+
+			"🎯 Количество: *%d генераций*\n\n"+
+			"📋 *Для оплаты:*\n"+
+			"1. Нажмите кнопку '💳 Оплатить'\n"+
+			"2. Оплатите через ЮKassa\n"+
+			"3. После оплаты нажмите '🔄 Проверить оплату'\n\n"+
+			"⌛️ *Ссылка действительна 30 минут*\n"+
+			"🆔 *ID платежа:* `%s`",
+		count, price, count, paymentResp.ID)
+
+	message := tgbotapi.NewMessage(chatID, msg)
+	message.ParseMode = "Markdown"
+	message.DisableWebPagePreview = true
+	message.ReplyMarkup = keyboard
+
+	if _, err := b.api.Send(message); err != nil {
+		log.Printf("[PAYMENT] ❌ Ошибка отправки сообщения: %v", err)
+	}
+
+	// Запускаем проверку статуса платежа в фоне
+	go b.checkPaymentStatus(chatID, paymentResp.ID)
+}
+
+// Обработчик проверки платежа
+func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
+	paymentID := strings.TrimPrefix(callback.Data, "check_")
+	userID := callback.Message.Chat.ID
+
+	// Проверяем статус платежа
+	paymentResp, err := b.yooMoney.CheckPayment(paymentID)
+	if err != nil {
+		b.sendMessage(userID, "❌ Ошибка при проверке платежа. Попробуйте позже.")
+		return
+	}
+
+	switch paymentResp.Status {
+	case "succeeded":
+		// Обновляем статус в базе
+		b.db.UpdatePurchaseStatus(paymentID, "succeeded")
+
+		// Получаем данные из метаданных
+		packageType := paymentResp.Metadata["package_type"]
+		count := paymentResp.Metadata["count"]
+
+		var packageCode string
+		var generationCount int
+
+		// Извлекаем значения из метаданных
+		if pkg, ok := packageType.(string); ok {
+			packageCode = strings.TrimPrefix(pkg, "buy_")
+		} else {
+			packageCode = "10" // fallback
+		}
+
+		if cnt, ok := count.(float64); ok {
+			generationCount = int(cnt)
+		} else if cnt, ok := count.(int); ok {
+			generationCount = cnt
+		} else {
+			generationCount = 10 // fallback
+		}
+
+		// Определяем цену по пакету
+		var price int
+		switch packageCode {
+		case "10":
+			price = 99
+		case "25":
+			price = 199
+		case "100":
+			price = 499
+		default:
+			price = 99
+		}
+
+		// Добавляем покупку в базу
+		if err := b.db.AddPurchase(userID, packageCode, price); err != nil {
+			b.sendMessage(userID, "❌ Ошибка при зачислении генераций. Обратитесь к администратору.")
+			return
+		}
+
+		user := b.db.GetUser(userID)
+
+		// Редактируем сообщение
+		b.editMessage(callback.Message.Chat.ID, callback.Message.MessageID,
+			fmt.Sprintf("✅ *Оплата успешна!*\n\n"+
+				"✨ Добавлено генераций: *%d*\n"+
+				"💰 Сумма: *%d руб.*\n"+
+				"🎯 Теперь доступно: *%d*\n\n"+
+				"Теперь вы можете использовать /generate для создания постов!",
+				generationCount, price, user.AvailableGenerations))
+
+		// Отправляем подтверждение
+		b.sendMessage(userID, "🎉 Оплата прошла успешно! Генерации зачислены на ваш счет.")
+
+	case "pending":
+		b.sendMessage(userID, "⏳ Платеж еще не прошел. Попробуйте проверить позже.")
+
+	case "canceled":
+		b.db.UpdatePurchaseStatus(paymentID, "canceled")
+		b.editMessage(callback.Message.Chat.ID, callback.Message.MessageID,
+			"❌ Платеж отменен. Если у вас есть вопросы, обратитесь к администратору.")
+
+	default:
+		b.sendMessage(userID, "⚠️ Неизвестный статус платежа: "+paymentResp.Status)
+	}
+}
+
+// Обработчик отмены платежа
+func (b *Bot) handleCancelPayment(callback *tgbotapi.CallbackQuery) {
+	paymentID := strings.TrimPrefix(callback.Data, "cancel_")
+	userID := callback.Message.Chat.ID
+
+	// Обновляем статус в базе
+	b.db.UpdatePurchaseStatus(paymentID, "canceled")
+
+	// Редактируем сообщение
+	b.editMessage(callback.Message.Chat.ID, callback.Message.MessageID,
+		"❌ Платеж отменен. Вы можете начать заново с помощью команды /buy")
+
+	b.sendMessage(userID, "Платеж отменен. Если вам нужна помощь, используйте /help")
+}
+
+// Периодическая проверка статуса платежей
+func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
+	// Ждем 30 секунд перед первой проверкой
+	time.Sleep(30 * time.Second)
+
+	for i := 0; i < 10; i++ { // Проверяем 10 раз с интервалом
+		paymentResp, err := b.yooMoney.CheckPayment(paymentID)
+		if err != nil {
+			log.Printf("[PAYMENT] Ошибка проверки статуса платежа %s: %v", paymentID, err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+
+		if paymentResp.Status == "succeeded" {
+			// Получаем данные из метаданных
+			packageType := paymentResp.Metadata["package_type"]
+			count := paymentResp.Metadata["count"]
+
+			var packageCode string
+			var generationCount int
+
+			// Извлекаем значения из метаданных
+			if pkg, ok := packageType.(string); ok {
+				packageCode = strings.TrimPrefix(pkg, "buy_")
+			} else {
+				packageCode = "10" // fallback
+			}
+
+			if cnt, ok := count.(float64); ok {
+				generationCount = int(cnt)
+			} else if cnt, ok := count.(int); ok {
+				generationCount = cnt
+			} else {
+				generationCount = 10 // fallback
+			}
+
+			// Определяем цену по пакету
+			var price int
+			switch packageCode {
+			case "10":
+				price = 99
+			case "25":
+				price = 199
+			case "100":
+				price = 499
+			default:
+				price = 99
+			}
+
+			// Автоматически зачисляем генерации
+			if err := b.db.AddPurchase(chatID, packageCode, price); err == nil {
+				b.sendMessage(chatID,
+					fmt.Sprintf("✅ Платеж прошел успешно! Зачислено %d генераций.", generationCount))
+				b.db.UpdatePurchaseStatus(paymentID, "succeeded")
+			}
+			return
+		} else if paymentResp.Status == "canceled" {
+			b.db.UpdatePurchaseStatus(paymentID, "canceled")
+			return
+		}
+
+		// Ждем 30 секунд перед следующей проверкой
+		time.Sleep(30 * time.Second)
+	}
+
+	// Если платеж все еще в ожидании, напоминаем
+	b.sendMessage(chatID,
+		"⏳ Ваш платеж все еще в ожидании. Вы можете проверить статус вручную, нажав кнопку '🔄 Проверить оплату' в сообщении о покупке.")
 }
 
 func (b *Bot) createBuyMenu() tgbotapi.InlineKeyboardMarkup {
