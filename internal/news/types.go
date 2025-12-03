@@ -14,6 +14,7 @@ type Article struct {
 	Source      string    `json:"source"`
 	Tags        []string  `json:"tags"`
 	Language    string    `json:"language"`
+	ImageURL    string    `json:"image_url"`
 }
 
 // NewsSource представляет источник новостей

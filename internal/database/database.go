@@ -283,6 +283,17 @@ func (db *Database) GetUser(userID int64) *User {
 	}
 }
 
+func (db *Database) GetAllUsers() []int64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	userIDs := make([]int64, 0, len(db.users))
+	for userID := range db.users {
+		userIDs = append(userIDs, userID)
+	}
+	return userIDs
+}
+
 func (db *Database) UpdateUser(user *User) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -478,17 +489,19 @@ func (db *Database) AddGenerations(userID int64, count int) error {
 
 	user, exists := db.users[userID]
 	if !exists {
+		// Создаем нового пользователя, если его нет
 		user = &User{
 			UserID:               userID,
-			AvailableGenerations: 10,
+			AvailableGenerations: 10 + count, // 10 бесплатных + добавленные
 			TotalGenerations:     0,
 			CreatedAt:            time.Now(),
 			GenerationsCount:     0,
 		}
 		db.users[userID] = user
+	} else {
+		user.AvailableGenerations += count
 	}
 
-	user.AvailableGenerations += count
 	log.Printf("[DB] Теперь у пользователя %d доступно %d генераций",
 		userID, user.AvailableGenerations)
 
@@ -508,6 +521,7 @@ func (db *Database) GetPricing() map[string]int {
 	}
 }
 
+// Исправленная функция статистики
 func (db *Database) GetStatistics(password string) map[string]interface{} {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -550,7 +564,21 @@ func (db *Database) calcPeriodStats(from, to time.Time) map[string]interface{} {
 		"total_revenue": 0,
 	}
 
-	// Подсчет покупок
+	// Подсчет пользователей
+	allUsersCount := 0
+	newUsersCount := 0
+
+	for _, user := range db.users {
+		allUsersCount++
+		if (from.IsZero() || user.CreatedAt.After(from)) && (to.IsZero() || user.CreatedAt.Before(to)) {
+			newUsersCount++
+		}
+	}
+
+	stats["users"] = allUsersCount
+	stats["new_users"] = newUsersCount
+
+	// Подсчет покупок (только успешные)
 	for _, purchase := range db.purchases {
 		if purchase.Status == "succeeded" && purchase.CreatedAt.After(from) && (to.IsZero() || purchase.CreatedAt.Before(to)) {
 			switch purchase.PackageType {

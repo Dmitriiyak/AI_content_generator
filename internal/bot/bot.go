@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -54,7 +55,6 @@ func (b *Bot) Start(ctx context.Context) {
 
 	log.Println("[BOT] Ожидание обновлений...")
 
-	// Обработка контекста завершения
 	go func() {
 		<-ctx.Done()
 		log.Println("[BOT] Получен сигнал завершения, останавливаю бота...")
@@ -75,14 +75,11 @@ func (b *Bot) Start(ctx context.Context) {
 			continue
 		}
 
-		// Обработка отзыва (если пользователь в состоянии ожидания отзыва)
 		if b.db.IsUserPendingFeedback(update.Message.Chat.ID) {
 			go b.handleFeedbackText(update.Message)
 			continue
 		}
 
-		// УБРАНО: обработка обычных текстовых сообщений
-		// Теперь только команда /generate
 		b.sendMessage(update.Message.Chat.ID,
 			"❌ Для генерации поста используйте команду /generate\n"+
 				"Пример: /generate искусственный интеллект\n"+
@@ -116,6 +113,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleCancelCommand(msg)
 	case "payments":
 		b.handlePaymentsCommand(msg)
+	case "sendmsg":
+		b.handleSendMessageCommand(msg)
+	case "addgenerations":
+		b.handleAddGenerationsCommand(msg)
 	default:
 		b.sendMessage(msg.Chat.ID, "❌ Неизвестная команда. Используйте /help для списка команд.")
 	}
@@ -216,7 +217,6 @@ func (b *Bot) handleGenerateCommand(msg *tgbotapi.Message) {
 
 // isURL проверяет, является ли строка URL
 func (b *Bot) isURL(text string) bool {
-	// Простая проверка на URL
 	return strings.HasPrefix(text, "http://") ||
 		strings.HasPrefix(text, "https://") ||
 		strings.Contains(text, "://")
@@ -240,6 +240,21 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 	}
 
 	log.Printf("[GENERATE] Начало обработки запроса от %d: %s", userID, keywords)
+
+	// Проверяем доступные генерации
+	user := b.db.GetUser(userID)
+	log.Printf("[GENERATE] Пользователь %d: доступно %d генераций", userID, user.AvailableGenerations)
+
+	if user.AvailableGenerations <= 0 {
+		text := "❌ Закончились генерации!\n\n" +
+			"💎 Используйте команду /buy чтобы приобрести дополнительные генерации\n\n" +
+			"✨ Доступные пакеты:\n" +
+			"• 10 генераций - 99 руб\n" +
+			"• 25 генераций - 199 руб\n" +
+			"• 100 генераций - 499 руб"
+		b.sendMessage(userID, text)
+		return
+	}
 
 	// Шаг 1: Начало процесса
 	step1Msg := b.sendMessage(userID, fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n⏳ Шаг 1/3: Ищу новости по теме...", keywords))
@@ -268,21 +283,34 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 		return
 	}
 
+	// Выбираем статью с изображением, если есть
+	var selectedArticle news.Article
+	for _, article := range articles {
+		if article.ImageURL != "" {
+			selectedArticle = article
+			break
+		}
+	}
+
+	// Если нет статьи с изображением, берем первую
+	if selectedArticle.Title == "" && len(articles) > 0 {
+		selectedArticle = articles[0]
+	}
+
 	// Шаг 3: Генерация через AI
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
 		fmt.Sprintf("🔄 Генерация поста начата\n\n🎯 Тема: %s\n\n✅ Шаг 1/3: ✓ Готово\n✅ Шаг 2/3: ✓ Найдено %d новостей\n⏳ Шаг 3/3: Генерация поста через AI...",
 			keywords, len(articles)))
 
-	log.Printf("[GENERATE] Шаг 3/3: Выбрана статья: %s", articles[0].Title)
+	log.Printf("[GENERATE] Шаг 3/3: Выбрана статья: %s", selectedArticle.Title)
 
 	// Генерируем пост через GPT
-	article := articles[0]
 	articleInfo := ai.ArticleInfo{
-		Title:    article.Title,
-		Summary:  article.Summary,
-		URL:      article.URL,
-		Source:   article.Source,
-		ImageURL: article.ImageURL,
+		Title:    selectedArticle.Title,
+		Summary:  selectedArticle.Summary,
+		URL:      selectedArticle.URL,
+		Source:   selectedArticle.Source,
+		ImageURL: selectedArticle.ImageURL,
 	}
 
 	log.Printf("[GENERATE] Генерация поста через AI...")
@@ -331,18 +359,25 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 			keywords, len(articles)))
 
 	// Отправляем результат
-	user := b.db.GetUser(userID)
+	user = b.db.GetUser(userID)
 
-	// 1. Отправляем картинку, если есть
-	if article.ImageURL != "" {
-		b.sendPhotoWithCaption(userID, article.ImageURL, "🖼️ *Изображение из новости*")
+	// 1. Отправляем изображение прямо в пост (если есть)
+	if selectedArticle.ImageURL != "" && b.isValidImageURL(selectedArticle.ImageURL) {
+		// Создаем сообщение с фото и текстом
+		if err := b.sendPhotoWithCaption(userID, selectedArticle.ImageURL, post); err != nil {
+			log.Printf("[GENERATE] ❌ Ошибка отправки фото с текстом: %v, отправляю только текст", err)
+			// Если не удалось отправить с фото, отправляем только текст
+			b.sendMessageWithMarkdown(userID, post)
+		} else {
+			log.Printf("[GENERATE] ✅ Пост отправлен с изображением")
+		}
+	} else {
+		// Если нет изображения, отправляем только текст
+		b.sendMessageWithMarkdown(userID, post)
 	}
 
-	// 1. Отправляем сгенерированный пост с Markdown разметкой
-	b.sendMessageWithMarkdown(userID, post)
-
 	// 2. Отправляем метаданные отдельным сообщением
-	hashtags := b.generateHashtags(article)
+	hashtags := b.generateHashtags(selectedArticle)
 	metadata := fmt.Sprintf(
 		"📋 *Метаданные для поста (добавьте по желанию):*\n\n"+
 			"🔖 *Рекомендуемые хештеги:*\n"+
@@ -350,8 +385,8 @@ func (b *Bot) handleGenerateFromKeywords(ctx context.Context, msg *tgbotapi.Mess
 			"📰 *Источник:* [Новость](%s) взята с %s\n\n"+
 			"✨ *Осталось генераций:* %d",
 		hashtags,
-		article.URL,
-		article.Source,
+		selectedArticle.URL,
+		selectedArticle.Source,
 		user.AvailableGenerations)
 
 	b.sendMessageWithMarkdown(userID, metadata)
@@ -402,7 +437,7 @@ func (b *Bot) handleGenerateFromURL(ctx context.Context, msg *tgbotapi.Message, 
 	b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
 		fmt.Sprintf("🔄 Генерация поста по ссылке\n\n🔗 %s\n\n✅ Шаг 1/3: ✓ Готово\n⏳ Шаг 2/3: Анализирую содержимое...", b.truncateURL(url)))
 
-	title, content, err := b.fetchWebContent(url)
+	title, content, mainImage, err := b.fetchWebContent(url)
 	if err != nil {
 		log.Printf("[GENERATE] ❌ Ошибка получения содержимого: %v", err)
 		b.editMessage(step1Msg.Chat.ID, step1Msg.MessageID,
@@ -470,8 +505,20 @@ func (b *Bot) handleGenerateFromURL(ctx context.Context, msg *tgbotapi.Message, 
 	// Отправляем результат
 	user = b.db.GetUser(userID)
 
-	// 1. Отправляем сгенерированный пост с Markdown разметкой
-	b.sendMessageWithMarkdown(userID, post)
+	// 1. Отправляем изображение прямо в пост (если есть)
+	if mainImage != "" && b.isValidImageURL(mainImage) {
+		// Создаем сообщение с фото и текстом
+		if err := b.sendPhotoWithCaption(userID, mainImage, post); err != nil {
+			log.Printf("[GENERATE] ❌ Ошибка отправки фото с текстом: %v, отправляю только текст", err)
+			// Если не удалось отправить с фото, отправляем только текст
+			b.sendMessageWithMarkdown(userID, post)
+		} else {
+			log.Printf("[GENERATE] ✅ Пост отправлен с изображением")
+		}
+	} else {
+		// Если нет изображения, отправляем только текст
+		b.sendMessageWithMarkdown(userID, post)
+	}
 
 	// 2. Отправляем метаданные отдельным сообщением
 	metadata := fmt.Sprintf(
@@ -491,48 +538,149 @@ func (b *Bot) handleGenerateFromURL(ctx context.Context, msg *tgbotapi.Message, 
 	log.Printf("[GENERATE] ✅ Завершена обработка ссылки от %d", userID)
 }
 
+// sendPhotoWithCaption отправляет фото с текстом поста
+func (b *Bot) sendPhotoWithCaption(chatID int64, photoURL, caption string) error {
+	// Ограничение Telegram на длину подписи к фото
+	maxCaptionLength := 1024
+	if len(caption) > maxCaptionLength {
+		caption = b.truncateText(caption, maxCaptionLength-3) + "..."
+	}
+
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
+	photo.Caption = caption
+	photo.ParseMode = "Markdown"
+
+	_, err := b.api.Send(photo)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки фото: %v, URL: %s", err, photoURL)
+		return err
+	}
+
+	log.Printf("[MESSAGE] Отправлено фото с подписью в чат %d", chatID)
+	return nil
+}
+
+// sendDocumentWithCaption отправляет документ с подписью
+func (b *Bot) sendDocumentWithCaption(chatID int64, docURL, caption string) error {
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileURL(docURL))
+	doc.Caption = caption
+	doc.ParseMode = "Markdown"
+
+	_, err := b.api.Send(doc)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки документа: %v, URL: %s", err, docURL)
+		return err
+	}
+
+	return nil
+}
+
+// isValidImageURL проверяет, является ли URL валидным изображением
+func (b *Bot) isValidImageURL(url string) bool {
+	if url == "" {
+		return false
+	}
+
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return false
+	}
+
+	validExtensions := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"}
+	urlLower := strings.ToLower(url)
+	for _, ext := range validExtensions {
+		if strings.HasSuffix(urlLower, ext) {
+			return true
+		}
+	}
+
+	imageIndicators := []string{"/img/", "/images/", "/photo/", "/pics/", "/assets/", "/media/", "image="}
+	for _, indicator := range imageIndicators {
+		if strings.Contains(urlLower, indicator) {
+			return true
+		}
+	}
+
+	return true
+}
+
 // fetchWebContent получает содержимое веб-страницы
-func (b *Bot) fetchWebContent(url string) (title, content string, err error) {
+func (b *Bot) fetchWebContent(url string) (string, string, string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("статус код: %d", resp.StatusCode)
+		return "", "", "", fmt.Errorf("статус код: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	html := string(body)
 
 	// Извлекаем заголовок
 	titleRegex := regexp.MustCompile(`<title[^>]*>([^<]+)</title>`)
+	var title string
 	if matches := titleRegex.FindStringSubmatch(html); len(matches) > 1 {
 		title = strings.TrimSpace(matches[1])
 	}
 
-	// Извлекаем основной контент (упрощенная версия)
-	// Убираем теги и оставляем текст
-	content = b.extractTextFromHTML(html)
+	// Извлекаем главное изображение
+	mainImage := b.extractMainImageFromHTML(html)
 
-	// Ограничиваем длину текста
+	// Извлекаем текст
+	content := b.extractTextFromHTML(html)
 	content = b.truncateText(content, 5000)
 
-	return title, content, nil
+	return title, content, mainImage, nil
+}
+
+// extractMainImageFromHTML извлекает URL главного изображения из HTML страницы
+func (b *Bot) extractMainImageFromHTML(html string) string {
+	// Приоритет 1: Open Graph изображение
+	ogImageRegex := regexp.MustCompile(`<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']`)
+	if matches := ogImageRegex.FindStringSubmatch(html); len(matches) > 1 {
+		return matches[1]
+	}
+
+	// Приоритет 2: Twitter изображение
+	twitterImageRegex := regexp.MustCompile(`<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']`)
+	if matches := twitterImageRegex.FindStringSubmatch(html); len(matches) > 1 {
+		return matches[1]
+	}
+
+	// Приоритет 3: Schema.org изображение
+	schemaImageRegex := regexp.MustCompile(`<meta[^>]+itemprop=["']image["'][^>]+content=["']([^"']+)["']`)
+	if matches := schemaImageRegex.FindStringSubmatch(html); len(matches) > 1 {
+		return matches[1]
+	}
+
+	// Приоритет 4: Изображение в статье
+	articleImgRegex := regexp.MustCompile(`<article[^>]*>.*?<img[^>]+src=["']([^"']+)["'][^>]*>`)
+	if matches := articleImgRegex.FindStringSubmatch(html); len(matches) > 1 {
+		return matches[1]
+	}
+
+	// Приоритет 5: Первое изображение
+	firstImgRegex := regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
+	if matches := firstImgRegex.FindStringSubmatch(html); len(matches) > 1 {
+		return matches[1]
+	}
+
+	return ""
 }
 
 // extractTextFromHTML извлекает текст из HTML
@@ -562,7 +710,6 @@ func (b *Bot) truncateText(text string, maxLength int) string {
 		return text
 	}
 
-	// Обрезаем до последнего полного слова
 	truncated := text[:maxLength]
 	lastSpace := strings.LastIndex(truncated, " ")
 	if lastSpace > 0 {
@@ -605,10 +752,7 @@ func (b *Bot) isGPTRefusal(post string) bool {
 	return false
 }
 
-// ... остальные методы bot.go остаются без изменений ...
-
 func (b *Bot) handleBuy(msg *tgbotapi.Message) {
-	// Проверяем, доступна ли платежная система
 	if b.yooMoney == nil {
 		b.sendMessage(msg.Chat.ID,
 			"❌ Платежная система временно недоступна\n\n"+
@@ -646,10 +790,8 @@ func (b *Bot) handleBalance(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) generateHashtags(article news.Article) string {
-	// Базовые хештеги
 	hashtags := []string{"новости", "интересное"}
 
-	// Добавляем теги из статьи
 	if len(article.Tags) > 0 {
 		for _, tag := range article.Tags {
 			if tag != "" {
@@ -661,7 +803,6 @@ func (b *Bot) generateHashtags(article news.Article) string {
 		}
 	}
 
-	// Форматируем хештеги
 	var result strings.Builder
 	for i, tag := range hashtags {
 		if i > 0 {
@@ -683,22 +824,7 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// Функция для отправки сообщений с Markdown
-func (b *Bot) sendMessageWithMarkdown(chatID int64, text string) tgbotapi.Message {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
-	msg.DisableWebPagePreview = true
-
-	message, err := b.api.Send(msg)
-	if err != nil {
-		log.Printf("[ERROR] Ошибка отправки сообщения с Markdown: %v", err)
-		// Пробуем отправить без Markdown
-		return b.sendMessage(chatID, text)
-	}
-	log.Printf("[MESSAGE] Отправлено сообщение с Markdown в чат %d, ID: %d", chatID, message.MessageID)
-	return message
-}
-
+// handleStatistics - исправленная функция статистики
 func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	args := strings.TrimSpace(msg.CommandArguments())
 	if args == "" {
@@ -717,10 +843,9 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	// Все время
 	if allTime, ok := stats["all_time"].(map[string]interface{}); ok {
 		text += "⏳ ЗА ВСЕ ВРЕМЯ:\n"
-		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
-			safeInt(allTime["users"]), safeInt(allTime["new_users"]))
-		text += fmt.Sprintf("🔄 Генераций: %d\n",
-			safeInt(allTime["generations"])) // Добавлено
+		text += fmt.Sprintf("👥 Всего пользователей: %d\n", safeInt(allTime["users"]))
+		text += fmt.Sprintf("🆕 Новых пользователей: %d\n", safeInt(allTime["new_users"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n", safeInt(allTime["generations"]))
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(allTime["purchases_10"]), safeInt(allTime["purchases_25"]), safeInt(allTime["purchases_100"]))
 		text += fmt.Sprintf("💵 Прибыль: %d руб.\n\n", safeInt(allTime["total_revenue"]))
@@ -729,10 +854,9 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	// Месяц
 	if month, ok := stats["last_month"].(map[string]interface{}); ok {
 		text += "📅 ЗА ПОСЛЕДНИЙ МЕСЯЦ:\n"
-		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
-			safeInt(month["users"]), safeInt(month["new_users"]))
-		text += fmt.Sprintf("🔄 Генераций: %d\n",
-			safeInt(month["generations"])) // Добавлено
+		text += fmt.Sprintf("👥 Всего пользователей: %d\n", safeInt(month["users"]))
+		text += fmt.Sprintf("🆕 Новых пользователей: %d\n", safeInt(month["new_users"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n", safeInt(month["generations"]))
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(month["purchases_10"]), safeInt(month["purchases_25"]), safeInt(month["purchases_100"]))
 		text += fmt.Sprintf("💵 Прибыль: %d руб.\n\n", safeInt(month["total_revenue"]))
@@ -741,16 +865,15 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	// День
 	if day, ok := stats["last_24h"].(map[string]interface{}); ok {
 		text += "🌞 ЗА ПОСЛЕДНИЕ 24 ЧАСА:\n"
-		text += fmt.Sprintf("👥 Пользователей: %d (%d новых)\n",
-			safeInt(day["users"]), safeInt(day["new_users"]))
-		text += fmt.Sprintf("🔄 Генераций: %d\n",
-			safeInt(day["generations"])) // Добавлено
+		text += fmt.Sprintf("👥 Всего пользователей: %d\n", safeInt(day["users"]))
+		text += fmt.Sprintf("🆕 Новых пользователей: %d\n", safeInt(day["new_users"]))
+		text += fmt.Sprintf("🔄 Генераций: %d\n", safeInt(day["generations"]))
 		text += fmt.Sprintf("💰 Покупки: 10(%d) 25(%d) 100(%d)\n",
 			safeInt(day["purchases_10"]), safeInt(day["purchases_25"]), safeInt(day["purchases_100"]))
-		text += fmt.Sprintf("💵 Прибыль: %d руб.", safeInt(day["total_revenue"]))
+		text += fmt.Sprintf("💵 Прибыль: %d руб.\n", safeInt(day["total_revenue"]))
 	}
 
-	// После вывода основной статистики можно добавить топ тем:
+	// Топ темы
 	topTopics := b.db.GetTopGenerationTopics(time.Time{}, time.Now(), 5)
 	if len(topTopics) > 0 {
 		text += "\n\n🎯 ТОП-5 ПОПУЛЯРНЫХ ТЕМ:\n"
@@ -765,6 +888,181 @@ func (b *Bot) handleStatistics(msg *tgbotapi.Message) {
 	}
 
 	b.sendMessage(msg.Chat.ID, text)
+}
+
+// handleSendMessageCommand - команда для отправки сообщений всем пользователям или конкретному
+func (b *Bot) handleSendMessageCommand(msg *tgbotapi.Message) {
+	args := strings.TrimSpace(msg.CommandArguments())
+	if args == "" {
+		b.sendMessage(msg.Chat.ID, "🔐 Использование:\n"+
+			"/sendmsg пароль текст_сообщения - отправить всем\n"+
+			"/sendmsg пароль chatid текст_сообщения - отправить конкретному пользователю")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) < 2 {
+		b.sendMessage(msg.Chat.ID, "❌ Недостаточно аргументов. Формат:\n"+
+			"/sendmsg пароль текст_сообщения\n"+
+			"или\n"+
+			"/sendmsg пароль chatid текст_сообщения")
+		return
+	}
+
+	// Проверяем пароль
+	password := parts[0]
+	adminPassword := b.getAdminPassword()
+
+	if password != adminPassword {
+		b.sendMessage(msg.Chat.ID, "❌ Неверный пароль")
+		return
+	}
+
+	// Определяем, есть ли chatid
+	var chatID int64
+	var messageText string
+	var sendToAll bool
+
+	if len(parts) >= 3 {
+		parsedChatID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			sendToAll = true
+			messageText = strings.Join(parts[1:], " ")
+		} else {
+			chatID = parsedChatID
+			messageText = strings.Join(parts[2:], " ")
+		}
+	} else {
+		sendToAll = true
+		messageText = strings.Join(parts[1:], " ")
+	}
+
+	if sendToAll {
+		users := b.db.GetAllUsers()
+		totalUsers := len(users)
+		successCount := 0
+		failCount := 0
+
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("🔄 Начинаю рассылку сообщения для %d пользователей...", totalUsers))
+
+		for i, userID := range users {
+			err := b.sendMessageToUser(userID, messageText)
+			if err != nil {
+				failCount++
+				log.Printf("[SENDMSG] ❌ Ошибка отправки пользователю %d: %v", userID, err)
+			} else {
+				successCount++
+			}
+
+			if i%10 == 0 && i > 0 {
+				time.Sleep(1 * time.Second)
+			}
+		}
+
+		report := fmt.Sprintf("✅ Рассылка завершена!\n\n"+
+			"📊 Статистика:\n"+
+			"👥 Всего пользователей: %d\n"+
+			"✅ Успешно отправлено: %d\n"+
+			"❌ Ошибок: %d",
+			totalUsers, successCount, failCount)
+
+		b.sendMessage(msg.Chat.ID, report)
+	} else {
+		err := b.sendMessageToUser(chatID, messageText)
+		if err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка отправки пользователю %d: %v", chatID, err))
+		} else {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("✅ Сообщение успешно отправлено пользователю %d", chatID))
+		}
+	}
+}
+
+// getAdminPassword возвращает пароль админа
+func (b *Bot) getAdminPassword() string {
+	adminPassword := os.Getenv("STATISTICS_PASSWORD")
+	if adminPassword == "" {
+		adminPassword = "admin123"
+	}
+	return adminPassword
+}
+
+// sendMessageToUser отправляет сообщение конкретному пользователю
+func (b *Bot) sendMessageToUser(chatID int64, message string) error {
+	msg := tgbotapi.NewMessage(chatID, message)
+	_, err := b.api.Send(msg)
+	return err
+}
+
+// handleAddGenerationsCommand - команда для добавления генераций пользователю
+func (b *Bot) handleAddGenerationsCommand(msg *tgbotapi.Message) {
+	args := strings.TrimSpace(msg.CommandArguments())
+	if args == "" {
+		b.sendMessage(msg.Chat.ID, "🔐 Использование:\n"+
+			"/addgenerations пароль chatid количество_генераций\n\n"+
+			"Пример: /addgenerations admin123 123456789 10")
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) != 3 {
+		b.sendMessage(msg.Chat.ID, "❌ Неверное количество аргументов. Формат:\n"+
+			"/addgenerations пароль chatid количество_генераций")
+		return
+	}
+
+	// Проверяем пароль
+	password := parts[0]
+	adminPassword := b.getAdminPassword()
+
+	if password != adminPassword {
+		b.sendMessage(msg.Chat.ID, "❌ Неверный пароль")
+		return
+	}
+
+	// Парсим chatid
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		b.sendMessage(msg.Chat.ID, "❌ Неверный chatid. Должен быть числом.")
+		return
+	}
+
+	// Парсим количество генераций
+	count, err := strconv.Atoi(parts[2])
+	if err != nil {
+		b.sendMessage(msg.Chat.ID, "❌ Неверное количество генераций. Должно быть числом.")
+		return
+	}
+
+	if count <= 0 {
+		b.sendMessage(msg.Chat.ID, "❌ Количество генераций должно быть больше 0.")
+		return
+	}
+
+	if count > 1000 {
+		b.sendMessage(msg.Chat.ID, "❌ Слишком большое количество генераций. Максимум 1000.")
+		return
+	}
+
+	// Добавляем генерации
+	err = b.db.AddGenerations(chatID, count)
+	if err != nil {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка добавления генераций: %v", err))
+		return
+	}
+
+	// Получаем обновленные данные пользователя
+	user := b.db.GetUser(chatID)
+
+	// Отправляем подтверждение админу
+	b.sendMessage(msg.Chat.ID, fmt.Sprintf("✅ Пользователю %d успешно добавлено %d генераций.\n"+
+		"Теперь у него доступно: %d генераций", chatID, count, user.AvailableGenerations))
+
+	// Отправляем уведомление пользователю
+	b.sendMessage(chatID, fmt.Sprintf("🎉 Администратор добавил вам %d генераций!\n\n"+
+		"✨ Теперь доступно: %d генераций\n"+
+		"📊 Всего использовано: %d\n\n"+
+		"Спасибо за использование нашего бота! 🚀",
+		count, user.AvailableGenerations, user.TotalGenerations))
 }
 
 func (b *Bot) handlePaymentsCommand(msg *tgbotapi.Message) {
@@ -792,7 +1090,6 @@ func (b *Bot) handlePaymentsCommand(msg *tgbotapi.Message) {
 func (b *Bot) handleFeedbackCommand(msg *tgbotapi.Message) {
 	userID := msg.Chat.ID
 
-	// Устанавливаем состояние ожидания отзыва
 	b.db.SetPendingFeedback(userID, true)
 
 	text := `📝 Оставьте отзыв о работе бота
@@ -814,7 +1111,6 @@ func (b *Bot) handleCancelCommand(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Сбрасываем состояние ожидания отзыва
 	b.db.SetPendingFeedback(userID, false)
 	b.db.ResetGenerationsCount(userID)
 
@@ -829,7 +1125,6 @@ func (b *Bot) handleFeedbackText(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Отправляем отзыв админу
 	username := "Без имени"
 	if msg.From != nil && msg.From.UserName != "" {
 		username = "@" + msg.From.UserName
@@ -853,16 +1148,13 @@ func (b *Bot) handleFeedbackText(msg *tgbotapi.Message) {
 
 	b.sendMessageWithMarkdown(b.adminChatID, adminMessage)
 
-	// Сбрасываем состояние ожидания отзыва
 	b.db.SetPendingFeedback(userID, false)
 	b.db.ResetGenerationsCount(userID)
 
-	// Отправляем благодарность пользователю
 	b.sendMessage(userID, "✅ Спасибо за ваш отзыв! Это очень ценно для нас! 🙏")
 }
 
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
-	// Отвечаем на callback
 	_, _ = b.api.Request(tgbotapi.NewCallback(callback.ID, ""))
 
 	data := callback.Data
@@ -880,9 +1172,8 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 
 func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
 	userID := callback.Message.Chat.ID
-	data := callback.Data // Формат: rate_X_topic
+	data := callback.Data
 
-	// Парсим оценку и тему
 	parts := strings.SplitN(data, "_", 3)
 	if len(parts) != 3 {
 		return
@@ -895,7 +1186,6 @@ func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
 
 	topic := parts[2]
 
-	// Получаем информацию о пользователе
 	username := "Без имени"
 	if callback.From != nil && callback.From.UserName != "" {
 		username = "@" + callback.From.UserName
@@ -906,7 +1196,6 @@ func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
 		}
 	}
 
-	// Отправляем оценку админу
 	adminMessage := fmt.Sprintf(
 		"⭐️ *НОВАЯ ОЦЕНКА*\n\n"+
 			"👤 Пользователь: %s\n"+
@@ -922,11 +1211,9 @@ func (b *Bot) handleRating(callback *tgbotapi.CallbackQuery) {
 
 	b.sendMessageWithMarkdown(b.adminChatID, adminMessage)
 
-	// Обновляем сообщение с кнопками
 	b.editMessage(callback.Message.Chat.ID, callback.Message.MessageID,
 		"✅ Спасибо за вашу оценку! Ваше мнение важно для нас! ⭐️")
 
-	// Уведомляем пользователя
 	b.sendMessage(userID, fmt.Sprintf("✅ Спасибо за оценку %d/5! Ваше мнение помогает нам становиться лучше! 🙌", rating))
 }
 
@@ -965,7 +1252,6 @@ func (b *Bot) handlePurchase(chatID int64, packageType string) {
 	if err != nil {
 		log.Printf("[PAYMENT] ❌ Ошибка создания платежа: %v", err)
 
-		// Более подробное сообщение об ошибке
 		errorMsg := fmt.Sprintf("❌ Ошибка при создании платежа:\n\n%s\n\n💡 Проверьте настройки платежной системы", err.Error())
 		b.sendMessage(chatID, errorMsg)
 		return
@@ -1054,7 +1340,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 		if pkg, ok := packageType.(string); ok {
 			packageCode = strings.TrimPrefix(pkg, "buy_")
 		} else {
-			packageCode = "10" // fallback
+			packageCode = "10"
 		}
 
 		if cnt, ok := count.(float64); ok {
@@ -1062,7 +1348,7 @@ func (b *Bot) handleCheckPayment(callback *tgbotapi.CallbackQuery) {
 		} else if cnt, ok := count.(int); ok {
 			generationCount = cnt
 		} else {
-			generationCount = 10 // fallback
+			generationCount = 10
 		}
 
 		// Определяем цену по пакету
@@ -1128,10 +1414,9 @@ func (b *Bot) handleCancelPayment(callback *tgbotapi.CallbackQuery) {
 
 // Периодическая проверка статуса платежей
 func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
-	// Ждем 30 секунд перед первой проверкой
 	time.Sleep(30 * time.Second)
 
-	for i := 0; i < 10; i++ { // Проверяем 10 раз с интервалом
+	for i := 0; i < 10; i++ {
 		paymentResp, err := b.yooMoney.CheckPayment(paymentID)
 		if err != nil {
 			log.Printf("[PAYMENT] Ошибка проверки статуса платежа %s: %v", paymentID, err)
@@ -1140,18 +1425,16 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 		}
 
 		if paymentResp.Status == "succeeded" {
-			// Получаем данные из метаданных
 			packageType := paymentResp.Metadata["package_type"]
 			count := paymentResp.Metadata["count"]
 
 			var packageCode string
 			var generationCount int
 
-			// Извлекаем значения из метаданных
 			if pkg, ok := packageType.(string); ok {
 				packageCode = strings.TrimPrefix(pkg, "buy_")
 			} else {
-				packageCode = "10" // fallback
+				packageCode = "10"
 			}
 
 			if cnt, ok := count.(float64); ok {
@@ -1159,10 +1442,9 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 			} else if cnt, ok := count.(int); ok {
 				generationCount = cnt
 			} else {
-				generationCount = 10 // fallback
+				generationCount = 10
 			}
 
-			// Определяем цену по пакету
 			var price int
 			switch packageCode {
 			case "10":
@@ -1175,7 +1457,6 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 				price = 99
 			}
 
-			// Автоматически зачисляем генерации
 			if err := b.db.AddPurchase(chatID, packageCode, price); err == nil {
 				b.sendMessage(chatID,
 					fmt.Sprintf("✅ Платеж прошел успешно! Зачислено %d генераций.", generationCount))
@@ -1187,11 +1468,9 @@ func (b *Bot) checkPaymentStatus(chatID int64, paymentID string) {
 			return
 		}
 
-		// Ждем 30 секунд перед следующей проверкой
 		time.Sleep(30 * time.Second)
 	}
 
-	// Если платеж все еще в ожидании, напоминаем
 	b.sendMessage(chatID,
 		"⏳ Ваш платеж все еще в ожидании. Вы можете проверить статус вручную, нажав кнопку '🔄 Проверить оплату' в сообщении о покупке.")
 }
@@ -1213,7 +1492,6 @@ func (b *Bot) createBuyMenu() tgbotapi.InlineKeyboardMarkup {
 func (b *Bot) sendRatingRequest(chatID int64, topic string) {
 	text := "⭐️ Оцените качество генерации:"
 
-	// Создаем кнопки оценки от 1 до 5
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("1 ⭐", fmt.Sprintf("rate_1_%s", topic)),
@@ -1239,6 +1517,21 @@ func (b *Bot) sendFeedbackReminder(chatID int64) {
 Ваше мнение очень важно для нас! 🙏`
 
 	b.sendMessageWithMarkdown(chatID, text)
+}
+
+// Функция для отправки сообщений с Markdown
+func (b *Bot) sendMessageWithMarkdown(chatID int64, text string) tgbotapi.Message {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	msg.DisableWebPagePreview = true
+
+	message, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("[ERROR] Ошибка отправки сообщения с Markdown: %v", err)
+		return b.sendMessage(chatID, text)
+	}
+	log.Printf("[MESSAGE] Отправлено сообщение с Markdown в чат %d, ID: %d", chatID, message.MessageID)
+	return message
 }
 
 func (b *Bot) sendMessage(chatID int64, text string) tgbotapi.Message {
@@ -1306,29 +1599,5 @@ func safeInt(value interface{}) int {
 		return 0
 	default:
 		return 0
-	}
-}
-
-func (b *Bot) sendPhotoWithCaption(chatID int64, photoURL, caption string) {
-	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photoURL))
-	photo.Caption = caption
-	photo.ParseMode = "Markdown"
-
-	_, err := b.api.Send(photo)
-	if err != nil {
-		log.Printf("[ERROR] Ошибка отправки фото: %v, URL: %s", err, photoURL)
-		// Пытаемся отправить как документ, если не получилось как фото
-		b.sendDocumentWithCaption(chatID, photoURL, caption)
-	}
-}
-
-func (b *Bot) sendDocumentWithCaption(chatID int64, docURL, caption string) {
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileURL(docURL))
-	doc.Caption = caption
-	doc.ParseMode = "Markdown"
-
-	_, err := b.api.Send(doc)
-	if err != nil {
-		log.Printf("[ERROR] Ошибка отправки документа: %v, URL: %s", err, docURL)
 	}
 }

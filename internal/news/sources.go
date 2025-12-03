@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -29,8 +30,87 @@ type RSS struct {
 			Description string `xml:"description"`
 			PubDate     string `xml:"pubDate"`
 			Category    string `xml:"category"`
+			Enclosure   []struct {
+				URL    string `xml:"url,attr"`
+				Type   string `xml:"type,attr"`
+				Length string `xml:"length,attr"`
+			} `xml:"enclosure"`
+			MediaContent struct {
+				URL    string `xml:"url,attr"`
+				Medium string `xml:"medium,attr"`
+				Type   string `xml:"type,attr"`
+			} `xml:"content"`
+			MediaThumbnail struct {
+				URL string `xml:"url,attr"`
+			} `xml:"thumbnail"`
 		} `xml:"item"`
 	} `xml:"channel"`
+}
+
+// extractImageFromItem извлекает URL изображения из элемента RSS
+func extractImageFromItem(item struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
+	Category    string `xml:"category"`
+	Enclosure   []struct {
+		URL    string `xml:"url,attr"`
+		Type   string `xml:"type,attr"`
+		Length string `xml:"length,attr"`
+	} `xml:"enclosure"`
+	MediaContent struct {
+		URL    string `xml:"url,attr"`
+		Medium string `xml:"medium,attr"`
+		Type   string `xml:"type,attr"`
+	} `xml:"content"`
+	MediaThumbnail struct {
+		URL string `xml:"url,attr"`
+	} `xml:"thumbnail"`
+}) string {
+	// 1. Проверяем media:content (обычно для медиа)
+	if item.MediaContent.URL != "" && (item.MediaContent.Medium == "image" ||
+		strings.Contains(item.MediaContent.Type, "image")) {
+		return item.MediaContent.URL
+	}
+
+	// 2. Проверяем enclosure (вложение)
+	for _, enclosure := range item.Enclosure {
+		if strings.Contains(enclosure.Type, "image") {
+			return enclosure.URL
+		}
+	}
+
+	// 3. Проверяем thumbnail
+	if item.MediaThumbnail.URL != "" {
+		return item.MediaThumbnail.URL
+	}
+
+	// 4. Извлекаем из описания HTML
+	if item.Description != "" {
+		// Ищем теги img
+		imgRegex := regexp.MustCompile(`<img[^>]+src="([^">]+)"`)
+		matches := imgRegex.FindStringSubmatch(item.Description)
+		if len(matches) > 1 {
+			return matches[1]
+		}
+
+		// Ищем data-src для lazy loading
+		dataSrcRegex := regexp.MustCompile(`data-src="([^">]+)"`)
+		matches = dataSrcRegex.FindStringSubmatch(item.Description)
+		if len(matches) > 1 {
+			return matches[1]
+		}
+
+		// Ищем в amp-img
+		ampImgRegex := regexp.MustCompile(`<amp-img[^>]+src="([^">]+)"`)
+		matches = ampImgRegex.FindStringSubmatch(item.Description)
+		if len(matches) > 1 {
+			return matches[1]
+		}
+	}
+
+	return ""
 }
 
 func (r *RSSSource) GetName() string {
@@ -96,6 +176,9 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 			continue
 		}
 
+		// Извлекаем изображение
+		imageURL := extractImageFromItem(item)
+
 		article := Article{
 			Title:       cleanText(item.Title),
 			URL:         item.Link,
@@ -103,6 +186,11 @@ func (r *RSSSource) FetchArticles() ([]Article, error) {
 			PublishedAt: pubDate,
 			Source:      r.Name,
 			Tags:        []string{item.Category},
+			ImageURL:    imageURL, // Добавляем URL картинки
+		}
+
+		if imageURL != "" {
+			log.Printf("[RSS] Найдено изображение для статьи: %s", imageURL)
 		}
 
 		articles = append(articles, article)
